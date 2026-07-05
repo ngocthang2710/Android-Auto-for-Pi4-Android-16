@@ -15,7 +15,7 @@
 
     <application
         android:label="Android Auto HU"
-        android:icon="@android:drawable/ic_media_play">
+        android:icon="@mipmap/ic_launcher">
 
         <!-- Receives USB_DEVICE_ATTACHED, handles AOAP mode switch -->
         <activity
