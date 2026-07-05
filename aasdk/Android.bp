@@ -1,0 +1,197 @@
+package {
+    default_applicable_licenses: ["external_aasdk_license"],
+}
+
+license {
+    name: "external_aasdk_license",
+    visibility: [":__subpackages__"],
+    license_kinds: ["SPDX-license-identifier-GPL-3.0"],
+    license_text: ["LICENSE"],
+}
+
+// -----------------------------------------------------------------------
+// aasdk — AOAP/SSL/Messenger/Channel core (static, no session logic)
+// -----------------------------------------------------------------------
+cc_library_static {
+    name: "aasdk",
+    cpp_std: "c++17",
+    cflags: [
+        "-fexceptions",
+        "-Wno-implicit-fallthrough",
+        "-Wno-unused-parameter",
+        "-Wno-ignored-qualifiers",
+        "-DBOOST_ASIO_DISABLE_BOOST_ARRAY=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_BIND=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_DATE_TIME=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_REGEX=1",
+        "-DBOOST_ASIO_SEPARATE_COMPILATION=1",
+        "-DBOOST_SYSTEM_NO_LIB=1",
+        "-DBOOST_DATE_TIME_NO_LIB=1",
+        "-DBOOST_REGEX_NO_LIB=1",
+    ],
+    srcs: [
+        "src/BoostAsioSeparateCompilation.cpp",
+        "src/Channel/AV/AudioServiceChannel.cpp",
+        "src/Channel/AV/AVInputServiceChannel.cpp",
+        "src/Channel/AV/MediaAudioServiceChannel.cpp",
+        "src/Channel/AV/SpeechAudioServiceChannel.cpp",
+        "src/Channel/AV/SystemAudioServiceChannel.cpp",
+        "src/Channel/AV/VideoServiceChannel.cpp",
+        "src/Channel/Bluetooth/BluetoothServiceChannel.cpp",
+        "src/Channel/Control/ControlServiceChannel.cpp",
+        "src/Channel/Input/InputServiceChannel.cpp",
+        "src/Channel/Sensor/SensorServiceChannel.cpp",
+        "src/Channel/ServiceChannel.cpp",
+        "src/Common/Data.cpp",
+        "src/Error/Error.cpp",
+        "src/IO/IOContextWrapper.cpp",
+        "src/Messenger/ChannelId.cpp",
+        "src/Messenger/ChannelReceiveMessageQueue.cpp",
+        "src/Messenger/ChannelReceivePromiseQueue.cpp",
+        "src/Messenger/Cryptor.cpp",
+        "src/Messenger/FrameHeader.cpp",
+        "src/Messenger/FrameSize.cpp",
+        "src/Messenger/Message.cpp",
+        "src/Messenger/MessageId.cpp",
+        "src/Messenger/MessageInStream.cpp",
+        "src/Messenger/MessageOutStream.cpp",
+        "src/Messenger/Messenger.cpp",
+        "src/Messenger/Timestamp.cpp",
+        "src/TCP/TCPEndpoint.cpp",
+        "src/TCP/TCPWrapper.cpp",
+        "src/Transport/DataSink.cpp",
+        "src/Transport/SSLWrapper.cpp",
+        "src/Transport/TCPTransport.cpp",
+        "src/Transport/Transport.cpp",
+        "src/Transport/USBTransport.cpp",
+        "src/USB/AccessoryModeProtocolVersionQuery.cpp",
+        "src/USB/AccessoryModeQueryChain.cpp",
+        "src/USB/AccessoryModeQueryChainFactory.cpp",
+        "src/USB/AccessoryModeQuery.cpp",
+        "src/USB/AccessoryModeQueryFactory.cpp",
+        "src/USB/AccessoryModeSendStringQuery.cpp",
+        "src/USB/AccessoryModeStartQuery.cpp",
+        "src/USB/AOAPDevice.cpp",
+        "src/USB/ConnectedAccessoriesEnumerator.cpp",
+        "src/USB/USBEndpoint.cpp",
+        "src/USB/USBHub.cpp",
+        "src/USB/USBWrapper.cpp",
+    ],
+    local_include_dirs: ["include"],
+    export_include_dirs: ["include"],
+    header_libs: ["aasdk_boost_headers"],
+    static_libs: [
+        "libprotobuf-cpp-lite",
+        "aasdk_proto",
+    ],
+    shared_libs: [
+        "libssl",
+        "libcrypto",
+        "liblog",
+        "libusb",
+    ],
+}
+
+// -----------------------------------------------------------------------
+// aasdk_session — Android-native projection layer (AMediaCodec/AAudio/JNI)
+// -----------------------------------------------------------------------
+cc_library_static {
+    name: "aasdk_session",
+    cpp_std: "c++17",
+    cflags: [
+        "-fexceptions",
+        "-Wno-unused-parameter",
+        "-DBOOST_ASIO_DISABLE_BOOST_ARRAY=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_BIND=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_DATE_TIME=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_REGEX=1",
+        "-DBOOST_ASIO_SEPARATE_COMPILATION=1",
+        "-DBOOST_SYSTEM_NO_LIB=1",
+        "-DBOOST_DATE_TIME_NO_LIB=1",
+        "-DBOOST_REGEX_NO_LIB=1",
+    ],
+    srcs: [
+        "session/src/AndroidAutoEntity.cpp",
+        "session/src/Pinger.cpp",
+        "session/src/VideoService.cpp",
+        "session/src/AudioService.cpp",
+        "session/src/SensorService.cpp",
+        "session/src/InputService.cpp",
+        "session/src/BluetoothService.cpp",
+        "session/src/AVInputService.cpp",
+        "session/src/AndroidVideoOutput.cpp",
+        "session/src/AndroidAudioOutput.cpp",
+        "session/src/AndroidInputDevice.cpp",
+        "session/src/AndroidAutoSession.cpp",
+    ],
+    local_include_dirs: [
+        "session/include",
+        "include",
+    ],
+    export_include_dirs: ["session/include"],
+    header_libs: ["aasdk_boost_headers"],
+    static_libs: [
+        "aasdk",
+        "aasdk_proto",
+        "libprotobuf-cpp-lite",
+    ],
+    shared_libs: [
+        "libssl",
+        "libcrypto",
+        "liblog",
+        "libusb",
+        "libmediandk",
+        "libaaudio",
+        "libnativewindow",
+    ],
+}
+
+// -----------------------------------------------------------------------
+// aasdk_jni — JNI bridge loaded by the Android app
+// -----------------------------------------------------------------------
+cc_library_shared {
+    name: "aasdk_jni",
+    // Module name has no "lib" prefix, so Soong's default output filename is
+    // "aasdk_jni.so" -- but System.loadLibrary("aasdk_jni") always looks for
+    // "libaasdk_jni.so" (hardcoded JVM/ART convention, not configurable on
+    // the Java side). Without this, dlopen can never find the file under any
+    // name, regardless of partition/namespace/embedding.
+    stem: "libaasdk_jni",
+    cpp_std: "c++17",
+    cflags: [
+        "-fexceptions",
+        "-Wno-unused-parameter",
+        "-DBOOST_ASIO_DISABLE_BOOST_ARRAY=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_BIND=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_DATE_TIME=1",
+        "-DBOOST_ASIO_DISABLE_BOOST_REGEX=1",
+        "-DBOOST_ASIO_SEPARATE_COMPILATION=1",
+        "-DBOOST_SYSTEM_NO_LIB=1",
+        "-DBOOST_DATE_TIME_NO_LIB=1",
+        "-DBOOST_REGEX_NO_LIB=1",
+    ],
+    srcs: ["jni/aasdk_jni.cpp"],
+    local_include_dirs: [
+        "session/include",
+        "include",
+    ],
+    header_libs: ["aasdk_boost_headers"],
+    static_libs: [
+        "aasdk_session",
+        "aasdk",
+        "aasdk_proto",
+        "libprotobuf-cpp-lite",
+    ],
+    shared_libs: [
+        "libssl",
+        "libcrypto",
+        "liblog",
+        "libusb",
+        "libmediandk",
+        "libaaudio",
+        "libnativewindow",
+        "libandroid",
+        "libjnigraphics",
+    ],
+    stl: "libc++",
+}

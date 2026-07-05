@@ -1,0 +1,51 @@
+/*
+*  This file is part of aasdk library project.
+*  Copyright (C) 2018 f1x.studio (Michal Szwaj)
+*
+*  aasdk is free software: you can redistribute it and/or modify
+*  it under the terms of the GNU General Public License as published by
+*  the Free Software Foundation; either version 3 of the License, or
+*  (at your option) any later version.
+
+*  aasdk is distributed in the hope that it will be useful,
+*  but WITHOUT ANY WARRANTY; without even the implied warranty of
+*  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*  GNU General Public License for more details.
+*
+*  You should have received a copy of the GNU General Public License
+*  along with aasdk. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+syntax="proto3";
+
+import "ChannelDescriptorData.proto";
+import "HeadUnitInfoMessage.proto";
+
+package f1x.aasdk.proto.messages;
+
+// Field layout matches the modern (post-2020) Android Auto wire schema, not
+// this library's original 2018 layout -- a real phone's AA app silently
+// refuses to open any channel against the old layout (verified live: full
+// SSL auth + service discovery completes, phone shows "connected", but zero
+// channels ever open). Field 6 changed type (bool -> DriverPosition enum),
+// field 12 (hide_clock) no longer exists on the wire, and fields 13/14/15/17
+// are new. Field 16 (connection_configuration, wireless-only) is
+// deliberately omitted since it doesn't apply to this wired-only head unit.
+message ServiceDiscoveryResponse
+{
+    repeated data.ChannelDescriptor channels = 1;
+    string head_unit_name = 2;
+    string car_model = 3;
+    string car_year = 4;
+    string car_serial = 5;
+    int32 driver_position = 6;
+    string headunit_manufacturer = 7;
+    string headunit_model = 8;
+    string sw_build = 9;
+    string sw_version = 10;
+    bool can_play_native_media_during_vr = 11;
+    int32 session_configuration = 13;
+    string display_name = 14;
+    bool probe_for_support = 15;
+    data.HeadUnitInfo headunit_info = 17;
+}

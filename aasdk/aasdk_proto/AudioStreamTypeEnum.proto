@@ -1,0 +1,18 @@
+syntax="proto3";
+
+package f1x.aasdk.proto.enums;
+
+// Values match the modern Android Auto wire protocol's AudioStreamType.
+// GUIDANCE (turn-by-turn voice prompts) is the modern equivalent of this
+// library's old SPEECH audio-channel role.
+message AudioStreamType
+{
+    enum Enum
+    {
+        NONE = 0;
+        GUIDANCE = 1;
+        SYSTEM_AUDIO = 2;
+        MEDIA = 3;
+        TELEPHONY = 4;
+    }
+}

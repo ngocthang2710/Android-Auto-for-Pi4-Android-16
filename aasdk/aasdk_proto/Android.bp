@@ -1,0 +1,22 @@
+// aasdk protobuf definitions.
+// MUST be in its own Android.bp with canonical_path_from_root:false so that
+// bare import "Foo.proto" in sibling .proto files resolves against this
+// directory, not the repo root.  Generated headers are flat (no aasdk_proto/
+// prefix); callers use #include <Foo.pb.h>.
+package {
+    default_applicable_licenses: ["external_aasdk_license"],
+}
+
+cc_library_static {
+    name: "aasdk_proto",
+    srcs: ["*.proto"],
+    proto: {
+        type: "lite",
+        canonical_path_from_root: false,
+        export_proto_headers: true,
+    },
+    cflags: [
+        "-Wno-unused-parameter",
+    ],
+    apex_available: ["//apex_available:platform"],
+}

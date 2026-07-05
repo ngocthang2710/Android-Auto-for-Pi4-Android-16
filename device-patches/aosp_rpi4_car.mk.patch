@@ -1,0 +1,40 @@
+diff --git a/aosp_rpi4_car.mk b/aosp_rpi4_car.mk
+index 764b347..8e61199 100644
+--- a/aosp_rpi4_car.mk
++++ b/aosp_rpi4_car.mk
+@@ -25,6 +25,10 @@ PRODUCT_PACKAGES += \
+ PRODUCT_PACKAGES += \
+     android.hardware.automotive.audiocontrol-service.example
+ 
++# audiocontrol-service.example binds ICarPowerPolicyServer/default at startup
++# and retries forever if it's missing, which stalls the driver user's boot.
++$(call inherit-product, packages/services/Car/cpp/power/product/carpowerpolicy.mk)
++
+ PRODUCT_COPY_FILES += \
+     $(DEVICE_PATH)/car/car_audio_configuration.xml:$(TARGET_COPY_OUT_VENDOR)/etc/car_audio_configuration.xml
+ 
+@@ -38,7 +42,7 @@ PRODUCT_VENDOR_PROPERTIES += \
+     bluetooth.profile.ccp.server.enabled=false \
+     bluetooth.profile.csip.set_coordinator.enabled=false \
+     bluetooth.profile.hap.client.enabled=false \
+-    bluetooth.profile.hfp.ag.enabled=false \
++    bluetooth.profile.hfp.ag.enabled=true \
+     bluetooth.profile.hid.device.enabled=false \
+     bluetooth.profile.hid.host.enabled=false \
+     bluetooth.profile.map.server.enabled=false \
+@@ -116,6 +120,15 @@ PRODUCT_COPY_FILES += \
+ PRODUCT_PACKAGES += \
+     android.hardware.automotive.vehicle@V4-default-service
+ 
++# Android Auto Head Unit (aasdk-based wired AA receiver)
++PRODUCT_PACKAGES += \
++    AaSdkUsbBridge
++
++# CarSystemUI's KeyguardService crash-loops without this (see
++# device/brcm/rpi4/permissions/default-permissions-com.android.systemui.xml)
++PRODUCT_PACKAGES += \
++    default-permissions-com.android.systemui.xml
++
+ # Device identifier. This must come after all inclusions.
+ PRODUCT_DEVICE := rpi4
+ PRODUCT_NAME := aosp_rpi4_car

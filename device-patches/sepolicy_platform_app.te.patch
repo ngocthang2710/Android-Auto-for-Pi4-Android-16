@@ -1,0 +1,12 @@
+diff --git a/sepolicy/platform_app.te b/sepolicy/platform_app.te
+index 775e964..8c5f048 100644
+--- a/sepolicy/platform_app.te
++++ b/sepolicy/platform_app.te
+@@ -1 +1,7 @@
+ gpu_access(platform_app)
++
++# AaSdkUsbBridge's aasdk_jni wraps an already-opened UsbDeviceConnection fd via
++# libusb_wrap_sys_device(), which still touches /dev/bus/usb directly.
++# Currently only surfaced as a permissive-mode avc denial (not blocking), but
++# needed if this device is ever switched to enforcing.
++r_dir_file(platform_app, usb_device)

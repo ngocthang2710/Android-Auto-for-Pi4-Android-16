@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.android.car.aasdk">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Lets CarUsbHandler recognize this app as an AOAP handler and auto-select
+         it (skipping its multi-app disambiguation dialog) instead of just a
+         generic usb-device handler. See AaSdkAoapService/device_filter.xml. -->
+    <uses-permission android:name="android.car.permission.CAR_HANDLE_USB_AOAP_DEVICE" />
+
+    <application
+        android:label="Android Auto HU"
+        android:icon="@android:drawable/ic_media_play">
+
+        <!-- Receives USB_DEVICE_ATTACHED, handles AOAP mode switch -->
+        <activity
+            android:name=".UsbAttachActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+
+        <!-- Full-screen AA display -->
+        <activity
+            android:name=".AaSdkScreenActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Background service that holds the C++ session -->
+        <service
+            android:name=".AaSdkUsbService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- Bound by android.car.usb.handler (CarUsbHandler) only, to ask whether
+             this app supports/wants a just-attached device before switching it to
+             AOAP mode. Must require MANAGE_USB per android.car.AoapService's
+             contract, so no other app can bind to it. -->
+        <service
+            android:name=".AaSdkAoapService"
+            android:exported="true"
+            android:permission="android.permission.MANAGE_USB" />
+    </application>
+</manifest>

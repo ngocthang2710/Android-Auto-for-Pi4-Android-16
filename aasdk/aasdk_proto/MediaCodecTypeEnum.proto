@@ -1,0 +1,19 @@
+syntax="proto3";
+
+package f1x.aasdk.proto.enums;
+
+// Values match the modern Android Auto wire protocol's MediaCodecType.
+message MediaCodecType
+{
+    enum Enum
+    {
+        NONE = 0;
+        AUDIO_PCM = 1;
+        AUDIO_AAC_LC = 2;
+        VIDEO_H264_BP = 3;
+        AUDIO_AAC_LC_ADTS = 4;
+        VIDEO_VP9 = 5;
+        VIDEO_AV1 = 6;
+        VIDEO_H265 = 7;
+    }
+}

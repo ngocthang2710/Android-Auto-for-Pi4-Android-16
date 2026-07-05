@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+
+<!--
+    CarSystemUI's KeyguardService constructs a LocalBluetoothManager on startup
+    (SettingsLibraryModule -> LocalBluetoothProfileManager.updateLocalProfiles),
+    which calls BluetoothAdapter.getSupportedProfiles() and throws
+    SecurityException without BLUETOOTH_CONNECT -- uncaught, so SystemUI
+    crash-loops forever and the car UI never renders (see
+    device/brcm/rpi4/aosp_rpi4_car.mk).
+-->
+<exceptions>
+    <exception package="com.android.systemui">
+      <permission name="android.permission.BLUETOOTH_CONNECT" fixed="false"/>
+    </exception>
+</exceptions>

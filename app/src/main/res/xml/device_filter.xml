@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Match all USB devices so any plugged phone triggers the AOAP mode-switch.
+     After the phone re-enumerates in accessory mode (VID=0x18D1), this filter
+     still matches and UsbAttachActivity detects accessory mode → start service.
+
+     The usb-aoap-accessory entry below registers this app as a recognized AOAP
+     handler with android.car.usb.handler (CarUsbHandler). When a device supports
+     AOAP and this is the only registered AOAP handler, CarUsbHandler skips its
+     disambiguation dialog and both performs the accessory-mode switch itself and
+     auto-launches UsbAttachActivity — no user tap needed, even if other generic
+     usb-device handlers (e.g. MTP Host) also match the same device. -->
+<resources>
+    <usb-device />
+    <usb-aoap-accessory manufacturer="Android" model="Android Auto"
+                        description="Android Auto Head Unit on AOSP Pi4" version="1.0"
+                        uri="https://accessories.android.com/" serial=""
+                        service="com.android.car.aasdk/com.android.car.aasdk.AaSdkAoapService"/>
+</resources>

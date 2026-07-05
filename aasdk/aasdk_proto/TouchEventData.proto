@@ -1,0 +1,38 @@
+/*
+*  This file is part of aasdk library project.
+*  Copyright (C) 2018 f1x.studio (Michal Szwaj)
+*
+*  aasdk is free software: you can redistribute it and/or modify
+*  it under the terms of the GNU General Public License as published by
+*  the Free Software Foundation; either version 3 of the License, or
+*  (at your option) any later version.
+
+*  aasdk is distributed in the hope that it will be useful,
+*  but WITHOUT ANY WARRANTY; without even the implied warranty of
+*  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*  GNU General Public License for more details.
+*
+*  You should have received a copy of the GNU General Public License
+*  along with aasdk. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+syntax="proto3";
+
+import "TouchLocationData.proto";
+import "TouchActionEnum.proto";
+
+package f1x.aasdk.proto.data;
+
+message TouchEvent
+{
+    repeated data.TouchLocation touch_location = 1;
+    uint32 action_index = 2;
+    // `optional` forces this to always be present on the wire, even when
+    // PRESS (its zero value) is set -- plain proto3 fields silently omit
+    // zero values, so every DOWN/PRESS event (touch_action=0) was being
+    // sent with NO touch_action field at all (confirmed via hex dump: a
+    // PRESS indication and a RELEASE indication differed by this field's
+    // presence, not its value). The phone apparently can't act on a touch
+    // event with no discernible action, so no tap ever did anything.
+    optional enums.TouchAction.Enum touch_action = 3;
+}

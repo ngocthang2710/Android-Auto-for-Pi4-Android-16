@@ -1,0 +1,44 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+android_app {
+    name: "AaSdkUsbBridge",
+    srcs: ["src/main/java/**/*.kt"],
+    resource_dirs: ["src/main/res"],
+    manifest: "src/main/AndroidManifest.xml",
+    // sdk_version forces jni_libs deps to need a matching "sdk" variant,
+    // which plain platform cc_library modules (aasdk_jni/libusb/libssl/
+    // libcrypto) don't have. This is a privileged platform app anyway, so
+    // build against internal platform APIs instead.
+    platform_apis: true,
+    min_sdk_version: "33",
+    certificate: "platform",
+    privileged: true,
+    // libssl/libcrypto/libusb are aasdk_jni's own NEEDED shared libs that
+    // aren't in /system/etc/public.libraries.txt (rightly so -- they're not
+    // stable public APIs), so they must be packaged alongside it or dlopen
+    // fails resolving aasdk_jni's own dependencies. See use_embedded_native_libs
+    // note below for why aasdk_jni itself needs the same treatment.
+    jni_libs: ["aasdk_jni", "libssl", "libcrypto", "libusb"],
+    // Without this, platform (non-unbundled) builds install aasdk_jni.so as
+    // a shared system lib and only symlink it into the app -- but apps can
+    // only dlopen system libs listed in /system/etc/public.libraries.txt, and
+    // aasdk_jni isn't (nor should it be, it's not a stable public API). This
+    // forces the .so to be packaged inside the APK instead, which apps can
+    // always load regardless of that allowlist.
+    use_embedded_native_libs: true,
+    kotlincflags: ["-Xjvm-default=all"],
+    // For android.car.AoapService (AaSdkAoapService) -- lets CarUsbHandler
+    // auto-select this app as the AOAP handler instead of showing its
+    // disambiguation dialog. See CAR_HANDLE_USB_AOAP_DEVICE privapp grant below.
+    libs: ["android.car-system-stubs"],
+    required: ["allowed_privapp_com.android.car.aasdk"],
+}
+
+prebuilt_etc {
+    name: "allowed_privapp_com.android.car.aasdk",
+    sub_dir: "permissions",
+    src: "com.android.car.aasdk.xml",
+    filename_from_src: true,
+}
