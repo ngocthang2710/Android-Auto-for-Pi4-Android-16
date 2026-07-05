@@ -39,37 +39,49 @@ Qt/RtAudio/OMX.
 
 ## Repo layout
 
-This mirrors three separate locations in an AOSP source tree (`external/aasdk`
-and `packages/apps/AaSdkUsbBridge` are standalone projects with no upstream
-git history to preserve; `device/brcm/rpi4` is an existing AOSP project, so
-its changes are kept as patches instead of full copies).
+This mirrors four separate locations in an `aosp_rpi4_car` source tree.
+`external/aasdk` and `packages/apps/AaSdkUsbBridge` are standalone projects
+this fork created (no upstream AOSP git history to preserve, so they're kept
+as full directory copies). `device/brcm/rpi4` and `frameworks/base` are
+existing AOSP projects, so only the diffs/new files are kept, as patches.
 
-```
-aasdk/            -> external/aasdk in the AOSP tree
-                     aasdk core (protocol/transport) + session/ (ported from
-                     openauto, Android-native video/audio/input sinks) +
-                     jni/ (bridges the Kotlin app to the C++ session)
-app/              -> packages/apps/AaSdkUsbBridge in the AOSP tree
-                     the Kotlin app: USB attach handling, AOAP mode-switch,
-                     foreground service holding the native session, the
-                     full-screen Android Auto SurfaceView activity
-device-patches/   -> diffs/new files against device/brcm/rpi4 in the AOSP tree
-                     PRODUCT_PACKAGES wiring, sepolicy, privapp permissions,
-                     a couple of unrelated boot-stability fixes needed to get
-                     this far (see below)
-platform-patches/ -> diffs against frameworks/base in the AOSP tree
-                     one unrelated boot-stability fix (see below)
-```
+### Full-copy directories -- 1:1 with their AOSP path
+
+| In this repo | Goes to (relative to AOSP source root) |
+|---|---|
+| `aasdk/` | `external/aasdk/` |
+| `app/` | `packages/apps/AaSdkUsbBridge/` |
+
+### `device-patches/` -- against `device/brcm/rpi4/`
+
+| In this repo | Applies to / installs at |
+|---|---|
+| `device-patches/aosp_rpi4_car.mk.patch` | `git apply` inside `device/brcm/rpi4/`, patches `aosp_rpi4_car.mk` |
+| `device-patches/sepolicy_platform_app.te.patch` | `git apply` inside `device/brcm/rpi4/`, patches `sepolicy/platform_app.te` |
+| `device-patches/permissions/Android.bp` | `device/brcm/rpi4/permissions/Android.bp` (new file) |
+| `device-patches/permissions/default-permissions-com.android.systemui.xml` | `device/brcm/rpi4/permissions/default-permissions-com.android.systemui.xml` (new file) |
+
+### `platform-patches/` -- against `frameworks/base/`
+
+| In this repo | Applies to |
+|---|---|
+| `platform-patches/NetworkPolicyManagerService.java.patch` | `git apply` inside `frameworks/base/`, patches `services/core/java/com/android/server/net/NetworkPolicyManagerService.java` |
 
 ## Building
 
-Drop `aasdk/` at `external/aasdk` and `app/` at `packages/apps/AaSdkUsbBridge`
-in an `aosp_rpi4_car` source tree, apply `device-patches/` under
-`device/brcm/rpi4` and `platform-patches/` under `frameworks/base` (the
-`.patch` files with `git apply`, the `permissions/` files copied in
-directly), then:
-
 ```
+cp -r aasdk/*   <AOSP_ROOT>/external/aasdk/
+cp -r app/*     <AOSP_ROOT>/packages/apps/AaSdkUsbBridge/
+
+cd <AOSP_ROOT>/device/brcm/rpi4
+git apply <THIS_REPO>/device-patches/aosp_rpi4_car.mk.patch
+git apply <THIS_REPO>/device-patches/sepolicy_platform_app.te.patch
+cp -r <THIS_REPO>/device-patches/permissions .
+
+cd <AOSP_ROOT>/frameworks/base
+git apply <THIS_REPO>/platform-patches/NetworkPolicyManagerService.java.patch
+
+cd <AOSP_ROOT>
 source build/envsetup.sh
 lunch aosp_rpi4_car-bp4a-userdebug
 m AaSdkUsbBridge
