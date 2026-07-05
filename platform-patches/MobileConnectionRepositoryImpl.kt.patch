@@ -1,0 +1,36 @@
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionRepositoryImpl.kt b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionRepositoryImpl.kt
+index 188a573eb892..b1adb67ceb10 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionRepositoryImpl.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionRepositoryImpl.kt
+@@ -21,6 +21,7 @@ import android.content.BroadcastReceiver
+ import android.content.Context
+ import android.content.Intent
+ import android.content.IntentFilter
++import android.content.pm.PackageManager
+ import android.net.ConnectivityManager
+ import android.net.ConnectivityManager.NetworkCallback
+ import android.net.Network
+@@ -413,8 +414,14 @@ class MobileConnectionRepositoryImpl(
+             .flowOn(bgDispatcher)
+             .stateIn(scope, SharingStarted.Eagerly, defaultNetworkName)
+ 
++    // isDataConnectionAllowed/setDataEnabledForReason throw UnsupportedOperationException on
++    // devices without FEATURE_TELEPHONY_DATA (e.g. a BT-HFP-backed subscription with no cellular
++    // data HAL) -- guard both, since a subId can exist without that feature being present.
++    private val isDataCapable =
++        context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY_DATA)
++
+     override val dataEnabled = run {
+-        val initial = telephonyManager.isDataConnectionAllowed
++        val initial = if (isDataCapable) telephonyManager.isDataConnectionAllowed else false
+         callbackEvents
+             .mapNotNull { it.onDataEnabledChanged }
+             .map { it.enabled }
+@@ -422,6 +429,7 @@ class MobileConnectionRepositoryImpl(
+     }
+ 
+     override fun setDataEnabled(enabled: Boolean) {
++        if (!isDataCapable) return
+         telephonyManager.setDataEnabledForReason(TelephonyManager.DATA_ENABLED_REASON_USER, enabled)
+     }
+ 
