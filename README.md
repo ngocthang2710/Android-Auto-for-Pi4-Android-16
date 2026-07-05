@@ -57,14 +57,17 @@ device-patches/   -> diffs/new files against device/brcm/rpi4 in the AOSP tree
                      PRODUCT_PACKAGES wiring, sepolicy, privapp permissions,
                      a couple of unrelated boot-stability fixes needed to get
                      this far (see below)
+platform-patches/ -> diffs against frameworks/base in the AOSP tree
+                     one unrelated boot-stability fix (see below)
 ```
 
 ## Building
 
 Drop `aasdk/` at `external/aasdk` and `app/` at `packages/apps/AaSdkUsbBridge`
 in an `aosp_rpi4_car` source tree, apply `device-patches/` under
-`device/brcm/rpi4` (the `.patch` files with `git apply`, the `permissions/`
-files copied in directly), then:
+`device/brcm/rpi4` and `platform-patches/` under `frameworks/base` (the
+`.patch` files with `git apply`, the `permissions/` files copied in
+directly), then:
 
 ```
 source build/envsetup.sh
@@ -109,6 +112,24 @@ USB fd handoff on accessory attach, a dedicated thread pumping
 `libusb_handle_events_timeout` (required -- aasdk's `USBTransport` submits
 async libusb transfers but nothing in the upstream library ever pumps the
 event loop that delivers their completions), and surface/touch passthrough.
+
+### Unrelated boot-stability fixes bundled in
+
+Two fixes unrelated to Android Auto itself, but required for this device to
+boot/render at all, are included since without them there'd be nothing to
+plug a phone into:
+
+- `platform-patches/`: `NetworkPolicyManagerService.updateSubscriptions()`
+  called `SubscriptionManager`/`TelephonyManager` APIs unconditionally, which
+  throws `UnsupportedOperationException` on a device with no telephony
+  subscription HAL (no modem) -- fatal inside `system_server`, crash-looping
+  boot forever. Guarded with a `hasSystemFeature(FEATURE_TELEPHONY_SUBSCRIPTION)`
+  check.
+- `device-patches/aosp_rpi4_car.mk.patch`: inherits `carpowerpolicy.mk`
+  (`android.hardware.automotive.audiocontrol-service` binds
+  `ICarPowerPolicyServer/default` at startup and retries forever without it)
+  and adds `default-permissions-com.android.systemui.xml` (CarSystemUI's
+  `KeyguardService` crash-loops without a `BLUETOOTH_CONNECT` grant).
 
 ## License
 

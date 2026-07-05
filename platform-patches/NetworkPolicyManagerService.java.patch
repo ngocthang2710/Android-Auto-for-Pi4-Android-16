@@ -1,0 +1,19 @@
+diff --git a/services/core/java/com/android/server/net/NetworkPolicyManagerService.java b/services/core/java/com/android/server/net/NetworkPolicyManagerService.java
+index 4fde316a4520..138ca2471784 100644
+--- a/services/core/java/com/android/server/net/NetworkPolicyManagerService.java
++++ b/services/core/java/com/android/server/net/NetworkPolicyManagerService.java
+@@ -2287,6 +2287,14 @@ public class NetworkPolicyManagerService extends INetworkPolicyManager.Stub {
+      */
+     void updateSubscriptions() {
+         if (LOGV) Slog.v(TAG, "updateSubscriptions()");
++        if (!mContext.getPackageManager().hasSystemFeature(
++                PackageManager.FEATURE_TELEPHONY_SUBSCRIPTION)) {
++            // Device has no telephony subscription HAL (e.g. no modem/RIL). Calling into
++            // SubscriptionManager/TelephonyManager below throws UnsupportedOperationException
++            // on such devices, which is fatal when it happens on this thread inside
++            // system_server, so bail out early instead of crash-looping boot.
++            return;
++        }
+         Trace.traceBegin(TRACE_TAG_NETWORK, "updateSubscriptions");
+ 
+         final TelephonyManager tm = mContext.getSystemService(TelephonyManager.class);
