@@ -11,6 +11,9 @@ protocol core also used by Crankshaft/OpenAuto), ported to build against
 bionic/Soong and to talk to Android-native video/audio/input APIs instead of
 Qt/RtAudio/OMX.
 
+![Android Auto running on the Pi4 head unit](docs/screenshot.png)
+*Google Maps + Spotify running side by side on the car screen, phone connected over wired USB.*
+
 ## Status
 
 **Working:**
