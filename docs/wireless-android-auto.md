@@ -314,6 +314,7 @@ Beyond what wired-only `AaSdkUsbBridge` already had:
 
 ## Apply
 
-Same procedure as the main [README](../README.md#building) -- this feature's
-files are part of the same `aasdk/`, `app/`, and `device-patches/` full-copy
-directories, no separate steps needed.
+Same procedure as the `main` branch's
+[README](https://github.com/ngocthang2710/Android-Auto-for-Pi4-Android-16/blob/main/README.md#building)
+-- this feature's files are part of the same `aasdk/`, `app/`, and
+`device-patches/` full-copy directories, no separate steps needed.

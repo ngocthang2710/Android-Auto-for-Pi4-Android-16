@@ -1,7 +1,8 @@
 # Wireless (WiFi) Android Auto for the RPi4 head unit
 
-Adds a **wireless** projection path on top of the wired head unit in this
-same repo (see [README.md](README.md) -- read that first). Once a phone has
+Adds a **wireless** projection path on top of the wired head unit that lives
+on this repo's [`main` branch](https://github.com/ngocthang2710/Android-Auto-for-Pi4-Android-16/blob/main/README.md)
+-- read that first. Once a phone has
 been Bluetooth-paired with the device (e.g. from a prior wired session, or
 plain OS-level BT pairing), it can launch Android Auto over WiFi with no
 cable, by connecting to a WiFi access point **hosted by the Pi4 itself**
@@ -78,9 +79,9 @@ video on real hardware: **[docs/wireless-android-auto.md](docs/wireless-android-
 
 ## Repo layout additions
 
-Same [full-copy directories](README.md#repo-layout) as the wired base
-(`aasdk/`, `app/`) -- this feature's files live inside those, no new
-top-level directories. One extra file under `device-patches/`:
+Same [full-copy directories](https://github.com/ngocthang2710/Android-Auto-for-Pi4-Android-16/blob/main/README.md#repo-layout)
+as the wired base (`aasdk/`, `app/`) -- this feature's files live inside
+those, no new top-level directories. One extra file under `device-patches/`:
 
 | In this repo | Applies to / installs at |
 |---|---|
@@ -94,9 +95,9 @@ INTERNET access) are broken down in
 ## Building
 
 No separate build steps -- this feature's files are part of the same
-`aasdk/`, `app/`, and `device-patches/` copies described in
-[README.md's Building section](README.md#building). Follow that procedure;
-there is nothing wireless-specific to do differently.
+`aasdk/`, `app/`, and `device-patches/` copies described in the `main`
+branch's [README.md Building section](https://github.com/ngocthang2710/Android-Auto-for-Pi4-Android-16/blob/main/README.md#building).
+Follow that procedure; there is nothing wireless-specific to do differently.
 
 ## License
 
