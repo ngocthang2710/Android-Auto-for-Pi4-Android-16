@@ -39,6 +39,12 @@ class AaSdkScreenActivity : Activity(), SurfaceHolder.Callback {
     private var surfaceWidth = 0
     private var surfaceHeight = 0
 
+    // Set once the surface has been torn down at least once (surfaceDestroyed
+    // fires when the HU backgrounds this Activity, e.g. Home then reopen).
+    // The *next* surfaceChanged after that is a genuine re-entry, not the
+    // Activity's first-ever attach -- only then do we force a fresh session.
+    private var wasBackgrounded = false
+
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as AaSdkUsbService.LocalBinder).getService()
@@ -122,10 +128,15 @@ class AaSdkScreenActivity : Activity(), SurfaceHolder.Callback {
         Log.d(TAG, "surfaceChanged ${width}x${height}")
         surfaceWidth = width
         surfaceHeight = height
+        if (wasBackgrounded) {
+            wasBackgrounded = false
+            service?.resetWirelessSessionForReentry()
+        }
         service?.attachDisplaySurface(holder.surface)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        wasBackgrounded = true
         service?.attachDisplaySurface(null)
     }
 

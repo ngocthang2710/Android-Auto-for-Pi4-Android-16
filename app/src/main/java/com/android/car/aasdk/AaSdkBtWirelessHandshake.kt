@@ -49,6 +49,12 @@ class AaSdkBtWirelessHandshake(private val hotspot: AaSdkSoftApHotspot) {
     private var serverSocket: BluetoothServerSocket? = null
     private var acceptThread: Thread? = null
 
+    // The currently-connected phone's RFCOMM link, if any -- tracked so
+    // forceDisconnect() can close exactly this socket (closing serverSocket
+    // alone only stops *future* accept() calls, it doesn't touch a socket
+    // already handed to handleConnection()).
+    @Volatile private var activeSocket: BluetoothSocket? = null
+
     fun start(tcpPort: Int) {
         val adapter = BluetoothAdapter.getDefaultAdapter()
         if (adapter == null) {
@@ -92,6 +98,28 @@ class AaSdkBtWirelessHandshake(private val hotspot: AaSdkSoftApHotspot) {
         hotspot.stop()
     }
 
+    // Ends the current phone's wireless AA session at the BT+WiFi level, not
+    // just the AA (TCP) protocol level -- closing only the TCP socket
+    // (AaSdkUsbService.resetWirelessSessionForReentry()'s first attempt) left
+    // the phone's own AA app never reconnecting: from its side, the BT link
+    // and WiFi AP both still looked alive, so it had no signal to redo
+    // discovery. Closing activeSocket here makes handleConnection()'s
+    // blocking read loop throw, which (via its finally block) tears down the
+    // SoftAP and closes the BT link -- exactly what happens on a full app
+    // process restart, which was the one thing observed to reliably make the
+    // phone redo its 5-stage handshake and reconnect. No-op if no phone is
+    // currently connected.
+    fun forceDisconnect() {
+        activeSocket?.let {
+            Log.i(TAG, "forceDisconnect: closing active BT link to force phone reconnect")
+            try {
+                it.close()
+            } catch (e: IOException) {
+                // already closed
+            }
+        }
+    }
+
     // Canonical 5-stage handshake, confirmed against aa-proxy-rs's own
     // stage-numbered log messages (our first attempt had this backwards --
     // WifiInfoResponse pushed before WifiStartRequest, never reading
@@ -111,6 +139,7 @@ class AaSdkBtWirelessHandshake(private val hotspot: AaSdkSoftApHotspot) {
         // any STA connection (e.g. adb-over-wifi), so it must stay off unless
         // a phone is actually here to use it.
         hotspot.start()
+        activeSocket = socket
         try {
             val out = socket.outputStream
             val input = socket.inputStream
@@ -160,6 +189,7 @@ class AaSdkBtWirelessHandshake(private val hotspot: AaSdkSoftApHotspot) {
             // not this BT link, but this BT link is held open for the entire
             // session (see the indefinite read loop above) -- so it ending is
             // the right signal that the AP is no longer needed either.
+            activeSocket = null
             hotspot.stop()
             try {
                 socket.close()

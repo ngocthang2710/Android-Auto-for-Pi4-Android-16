@@ -48,6 +48,7 @@ class AaSdkUsbService : Service() {
     private external fun nativeOnTcpAccepted(handle: Long, fd: Int)
     private external fun nativeSetSurface(handle: Long, surface: Surface?)
     private external fun nativeSendTouchEvent(handle: Long, action: Int, x: Float, y: Float)
+    private external fun nativeResetSession(handle: Long)
 
     inner class LocalBinder : Binder() {
         fun getService() = this@AaSdkUsbService
@@ -107,6 +108,33 @@ class AaSdkUsbService : Service() {
     /** Called by AaSdkScreenActivity with its current Surface, or null when torn down. */
     fun attachDisplaySurface(surface: Surface?) {
         videoBlitter?.setOutputSurface(surface)
+    }
+
+    // Wireless (TCP) sessions have been observed going silent while the HU
+    // screen is backgrounded -- the socket stays connected but the phone
+    // never responds to anything again, leaving a permanently black screen
+    // on return with no local error. USB sessions don't need this: the
+    // phone doesn't reconnect just because our Activity was recreated (see
+    // AndroidVideoOutput::init()), and forcing a reset would mean a real
+    // USB AOAP replug, which this can't trigger anyway -- attachedDevice
+    // being null is exactly the signal that the current session is TCP.
+    //
+    // First attempt only closed the native TCP session (nativeResetSession)
+    // -- confirmed by log NOT to work: the phone's own AA app never
+    // reconnected afterwards (no further "TCP client connected" ever
+    // logged), because from the phone's side the BT link and WiFi AP both
+    // still looked fine, so it had no signal to redo discovery. Must tear
+    // down the BT+AP link too (btWireless.forceDisconnect(), which tears
+    // down the SoftAP via its own teardown path) -- that's what a full app
+    // process restart did by accident in earlier testing, and it was the
+    // one thing observed to reliably make the phone redo its full 5-stage
+    // handshake and reconnect.
+    fun resetWirelessSessionForReentry() {
+        if (nativeHandle != 0L && attachedDevice == null) {
+            Log.i(TAG, "Re-entering AA screen on a wireless session -- forcing reconnect")
+            nativeResetSession(nativeHandle)
+            btWireless.forceDisconnect()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

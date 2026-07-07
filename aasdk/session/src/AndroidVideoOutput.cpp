@@ -1,7 +1,9 @@
 #include <AndroidVideoOutput.hpp>
 #include <android/log.h>
 #include <media/NdkMediaFormat.h>
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #define LOG_TAG "AaSdk_Video"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -88,31 +90,59 @@ bool AndroidVideoOutput::init(ANativeWindow* window, int width, int height) {
     window_ = window;
     ANativeWindow_acquire(window_);
 
-    codec_ = AMediaCodec_createDecoderByType("video/avc");
-    if (!codec_) {
-        LOGE("Failed to create AVC decoder");
-        return false;
+    // Configure retries with a short backoff instead of failing on the first
+    // error: when a session is force-reconnected (see AaSdkUsbService.
+    // resetWirelessSessionForReentry()), the *previous* session's codec on
+    // this exact same persistent window (VideoBlitter's input Surface --
+    // never swapped, see its own kdoc) may not have finished its async
+    // CCodec/HAL-side teardown yet. Confirmed live: AMediaCodec_delete()
+    // returning does not guarantee the window's nativeWindowDisconnect has
+    // actually completed, so a fast reconnect hits
+    // "nativeWindowConnect ... Invalid argument (-22)" -- a real Android
+    // platform race, not a logic bug here. Matches the retry-tolerant
+    // pattern this device's decoder already needs elsewhere (see warmup()).
+    constexpr int kMaxConfigureAttempts = 5;
+    constexpr auto kRetryDelay = std::chrono::milliseconds(150);
+    media_status_t status = AMEDIA_ERROR_UNKNOWN;
+    for (int attempt = 1; attempt <= kMaxConfigureAttempts; ++attempt) {
+        codec_ = AMediaCodec_createDecoderByType("video/avc");
+        if (!codec_) {
+            LOGE("Failed to create AVC decoder (attempt %d/%d)", attempt, kMaxConfigureAttempts);
+            std::this_thread::sleep_for(kRetryDelay);
+            continue;
+        }
+
+        AMediaFormat* fmt = AMediaFormat_new();
+        AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "video/avc");
+        AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, width);
+        AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, height);
+        // Low-latency mode: output frames as soon as decoded
+        AMediaFormat_setInt32(fmt, "low-latency", 1);
+
+        status = AMediaCodec_configure(codec_, fmt, window_, nullptr, 0);
+        AMediaFormat_delete(fmt);
+
+        if (status == AMEDIA_OK) break;
+
+        LOGE("AMediaCodec_configure failed: %d (attempt %d/%d), retrying",
+             (int)status, attempt, kMaxConfigureAttempts);
+        AMediaCodec_delete(codec_);
+        codec_ = nullptr;
+        std::this_thread::sleep_for(kRetryDelay);
     }
 
-    AMediaFormat* fmt = AMediaFormat_new();
-    AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "video/avc");
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, width);
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, height);
-    // Low-latency mode: output frames as soon as decoded
-    AMediaFormat_setInt32(fmt, "low-latency", 1);
-
-    media_status_t status = AMediaCodec_configure(
-        codec_, fmt, window_, nullptr, 0);
-    AMediaFormat_delete(fmt);
-
     if (status != AMEDIA_OK) {
-        LOGE("AMediaCodec_configure failed: %d", (int)status);
+        LOGE("AMediaCodec_configure failed after %d attempts: %d", kMaxConfigureAttempts, (int)status);
+        if (window_) { ANativeWindow_release(window_); window_ = nullptr; }
         return false;
     }
 
     status = AMediaCodec_start(codec_);
     if (status != AMEDIA_OK) {
         LOGE("AMediaCodec_start failed: %d", (int)status);
+        AMediaCodec_delete(codec_);
+        codec_ = nullptr;
+        if (window_) { ANativeWindow_release(window_); window_ = nullptr; }
         return false;
     }
 

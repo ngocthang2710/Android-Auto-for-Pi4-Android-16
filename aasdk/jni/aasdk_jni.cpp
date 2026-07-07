@@ -161,6 +161,29 @@ Java_com_android_car_aasdk_AaSdkUsbService_nativeOnAccessoryDetached(
     LOGI("session torn down on accessory detach");
 }
 
+// Called from Java when AaSdkScreenActivity is re-entered after having been
+// backgrounded (see surfaceChanged in AaSdkScreenActivity.kt). Wireless (TCP)
+// sessions have been observed going silent in the background -- the socket
+// stays ESTABLISHED but the phone stops answering anything, including
+// pings -- with no local signal that anything is wrong. Force-closing our
+// end here (destroying the session tears down the transport, which closes
+// the underlying TCP socket) makes the phone notice the disconnect and
+// reconnect on its own; nativeOnTcpAccepted already replaces a stale session
+// cleanly when that new connection comes in. Only called for wireless
+// sessions -- see AaSdkUsbService.resetWirelessSessionForReentry().
+JNIEXPORT void JNICALL
+Java_com_android_car_aasdk_AaSdkUsbService_nativeResetSession(
+        JNIEnv*, jobject, jlong handle) {
+    auto* ctx = reinterpret_cast<NativeContext*>(handle);
+    if (!ctx) return;
+
+    std::lock_guard<std::mutex> lk(ctx->mu);
+    if (ctx->session) {
+        ctx->session.reset();
+        LOGI("session force-reset on screen re-entry");
+    }
+}
+
 JNIEXPORT void JNICALL
 Java_com_android_car_aasdk_AaSdkUsbService_nativeSetSurface(
         JNIEnv* env, jobject, jlong handle, jobject surface) {
