@@ -1,10 +1,13 @@
-# Android Auto (wired) head unit for Raspberry Pi 4 / AOSP Automotive
+# Android Auto (wired + wireless) head unit for Raspberry Pi 4 / AOSP Automotive
 
-Turns a Raspberry Pi 4 running **AOSP Automotive** (`aosp_rpi4_car`) into a
-wired **Android Auto head unit**: plug a phone into a USB-A port and it
-projects Android Auto onto the car's screen, the same way Crankshaft/OpenAuto
-do on bare Debian -- except this runs natively on Android itself, on top of
-the platform's own USB/AOAP stack.
+Turns a Raspberry Pi 4 running **AOSP Automotive** (`aosp_rpi4_car`) into an
+**Android Auto head unit**, wired or wireless: plug a phone into a USB-A port
+(AOAP), or -- once BT-paired -- let it connect over WiFi to an access point
+the Pi4 hosts itself, and it projects Android Auto onto the car's screen, the
+same way Crankshaft/OpenAuto do on bare Debian -- except this runs natively on
+Android itself, on top of the platform's own USB/AOAP and WiFi-tethering
+stacks. See [docs/wireless-android-auto.md](docs/wireless-android-auto.md)
+for the full wireless architecture and debugging log.
 
 It's built around [f1xpl/aasdk](https://github.com/f1xpl/aasdk) (the AOAP
 protocol core also used by Crankshaft/OpenAuto), ported to build against
@@ -19,6 +22,9 @@ Qt/RtAudio/OMX.
 **Working:**
 - USB attach -> AOAP mode-switch -> SSL handshake -> service discovery ->
   video/audio/sensor channels, all the way to a rendered Android Auto screen.
+- **Wireless**: BT handshake -> self-hosted WiFi AP -> TCP session -> SSL
+  handshake -> service discovery -> rendered screen, confirmed end-to-end on
+  real hardware. See [docs/wireless-android-auto.md](docs/wireless-android-auto.md).
 - Zero-tap auto-launch: plugging the phone in is enough, no dialog to tap
   and no need to have the app already open (see [Auto-launch](#auto-launch-no-dialog)).
 - Auto-return to the car's home screen when the phone is unplugged.
@@ -63,6 +69,7 @@ existing AOSP projects, so only the diffs/new files are kept, as patches.
 | `device-patches/sepolicy_platform_app.te.patch` | `git apply` inside `device/brcm/rpi4/`, patches `sepolicy/platform_app.te` |
 | `device-patches/permissions/Android.bp` | `device/brcm/rpi4/permissions/Android.bp` (new file) |
 | `device-patches/permissions/default-permissions-com.android.systemui.xml` | `device/brcm/rpi4/permissions/default-permissions-com.android.systemui.xml` (new file) |
+| `device-patches/permissions/default-permissions-com.android.car.aasdk.xml` | `device/brcm/rpi4/permissions/default-permissions-com.android.car.aasdk.xml` (new file) |
 
 ### `platform-patches/` -- against `frameworks/base/`
 
@@ -120,13 +127,28 @@ sinks for Android-native ones:
   `ANativeWindow` from a Java `Surface`, no per-frame JNI.
 - `AndroidAudioOutput` -- NDK AAudio, one instance per audio channel.
 - `AndroidInputDevice` -- touch events injected via JNI from a `SurfaceView`.
-- `DummyBluetoothDevice` -- reports unavailable (no Bluetooth pairing yet).
+- `DummyBluetoothDevice` -- reports the *in-protocol* AA Bluetooth channel
+  unavailable (deliberately not advertised in service discovery -- this is
+  unrelated to the OS-level Bluetooth RFCOMM socket the wireless path uses
+  for its own WiFi-credential handoff, see below).
 
 `aasdk/jni/aasdk_jni.cpp` bridges `AaSdkUsbService` (Kotlin) to this layer:
 USB fd handoff on accessory attach, a dedicated thread pumping
 `libusb_handle_events_timeout` (required -- aasdk's `USBTransport` submits
 async libusb transfers but nothing in the upstream library ever pumps the
 event loop that delivers their completions), and surface/touch passthrough.
+
+### Wireless (WiFi) projection
+
+`AaSdkBtWirelessHandshake` (BT RFCOMM handoff) and `AaSdkSoftApHotspot`
+(self-hosted WiFi AP via `TetheringManager`) let a BT-paired phone launch
+Android Auto with no cable, over a WiFi AP the Pi4 hosts itself rather than a
+shared network. The same native session stack above handles it identically
+to USB once a TCP connection lands (`aasdk/session/include/AndroidAutoSession.hpp`'s
+`createAndroidAutoSessionTcp`, sharing everything but the transport
+construction with the USB path). Full architecture, protocol details, and
+the bugs found getting it working on real hardware:
+[docs/wireless-android-auto.md](docs/wireless-android-auto.md).
 
 ### Unrelated boot-stability fixes bundled in
 
