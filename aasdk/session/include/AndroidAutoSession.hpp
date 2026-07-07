@@ -31,6 +31,16 @@ AaSdkUsbSessionPtr createAndroidAutoSession(
     f1x::aasdk::usb::IUSBWrapper& usbWrapper,
     int fd);
 
+// Same session (SSL/messenger/services/entity), built over an already-connected
+// TCP socket fd instead of a USB accessory -- e.g. a socket accepted from a
+// wireless-projection TCP listener.
+// fd: a connected, native socket fd (e.g. from ParcelFileDescriptor.detachFd()
+//     on the Java side after accepting a connection).
+AaSdkUsbSessionPtr createAndroidAutoSessionTcp(
+    JNIEnv* env,
+    jobject serviceObj,
+    int fd);
+
 void sessionSetSurface(AaSdkUsbSession* session, ANativeWindow* window);
 void sessionSendTouchEvent(AaSdkUsbSession* session, int action, float x, float y);
 

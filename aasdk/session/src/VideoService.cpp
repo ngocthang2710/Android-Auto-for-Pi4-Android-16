@@ -103,26 +103,56 @@ void VideoService::onAVChannelSetupRequest(const proto::messages::AVChannelSetup
     const size_t idx = kDefaultConfigIndex;
     LOGI("setup request config_index=%u, using %dx%d", req.config_index(),
          kVideoConfigs[idx].width, kVideoConfigs[idx].height);
-    bool ok = output_->init(nullptr /*window set separately via nativeSetSurface*/,
-                             kVideoConfigs[idx].width, kVideoConfigs[idx].height);
+    // Do NOT call output_->init(nullptr, ...) here anymore. This used to be
+    // harmless under the old design, where the Activity's own Surface always
+    // arrived *after* this call (Activity/window creation lag reliably beat
+    // the phone's protocol round trip), so init(nullptr,...)'s effect (detach
+    // the window) was immediately overwritten moments later by the real
+    // nativeSetSurface call. Now the decoder's window is the persistent
+    // VideoBlitter input Surface, attached once via nativeSetSurface at
+    // Service startup -- long before any session/AVChannelSetupRequest even
+    // exists -- so this call would run *after* the real window is already
+    // attached and rip it back out, permanently zeroing AndroidVideoOutput's
+    // window_ (codec keeps decoding, but every releaseOutputBuffer's render
+    // flag is false forever -- confirmed live via write()/drainOutput()
+    // counters: outputBufferCount climbing steadily, render=0 on every call).
+    // Width/height are already fixed constants (kVideoConfigs) matching the
+    // VideoBlitter's persistent SurfaceTexture size, so there's nothing this
+    // call needs to (re)configure.
+    bool ok = true;
     proto::messages::AVChannelSetupResponse resp;
     resp.set_media_status(ok ? proto::enums::AVChannelSetupStatus::OK
                               : proto::enums::AVChannelSetupStatus::FAIL);
     resp.set_max_unacked(1);
-    resp.add_configs(req.config_index());
+    // openauto (our reference implementation) hardcodes config index 0 here
+    // regardless of what the phone requested, rather than echoing
+    // req.config_index() back -- aligning with that now since the phone
+    // stalling right after this response (never sending AVChannelStartIndication)
+    // is the open bug this session is chasing.
+    resp.add_configs(0);
     auto promise = channel::SendPromise::defer(strand_);
-    promise->then(std::bind(&VideoService::sendVideoFocusIndication, shared_from_this()),
+    promise->then(std::bind(&VideoService::sendVideoFocusIndication, shared_from_this(), true),
                   [](const error::Error& e) { LOGE("sendAVChannelSetupResponse error: %s", e.what()); });
     channel_->sendAVChannelSetupResponse(resp, std::move(promise));
     channel_->receive(shared_from_this());
 }
 
-void VideoService::sendVideoFocusIndication() {
+void VideoService::sendVideoFocusIndication(bool unrequested) {
+    // unrequested=true: this HU is proactively granting focus right after
+    // setup, without the phone having asked (VideoFocusRequest) first.
+    // unrequested=false: this is a direct reply to the phone's own request
+    // (see onVideoFocusRequest). The previous code always sent false, even
+    // for the proactive post-setup push -- mislabeling an unsolicited grant
+    // as "answering a request that was never made," which the phone may
+    // have silently ignored, explaining why it never followed up with
+    // AVChannelStartIndication.
+    LOGI("sending VideoFocusIndication(FOCUSED, unrequested=%d)", (int)unrequested);
     proto::messages::VideoFocusIndication ind;
     ind.set_focus_mode(proto::enums::VideoFocusMode::FOCUSED);
-    ind.set_unrequested(false);
+    ind.set_unrequested(unrequested);
     auto promise = channel::SendPromise::defer(strand_);
-    promise->then([]() {}, [](const error::Error& e) { LOGE("VideoFocusIndication error: %s", e.what()); });
+    promise->then([]() { LOGI("VideoFocusIndication sent OK"); },
+                  [](const error::Error& e) { LOGE("VideoFocusIndication error: %s", e.what()); });
     channel_->sendVideoFocusIndication(ind, std::move(promise));
 }
 
@@ -159,8 +189,9 @@ void VideoService::onAVMediaIndication(const common::DataConstBuffer& buf) {
     channel_->receive(shared_from_this());
 }
 
-void VideoService::onVideoFocusRequest(const proto::messages::VideoFocusRequest&) {
-    sendVideoFocusIndication();
+void VideoService::onVideoFocusRequest(const proto::messages::VideoFocusRequest& req) {
+    LOGI("video focus request mode=%d reason=%d", (int)req.focus_mode(), (int)req.focus_reason());
+    sendVideoFocusIndication(false);
     channel_->receive(shared_from_this());
 }
 

@@ -10,8 +10,11 @@
 #include <AndroidAudioOutput.hpp>
 #include <f1x/aasdk/USB/AOAPDevice.hpp>
 #include <f1x/aasdk/USB/USBWrapper.hpp>
+#include <f1x/aasdk/TCP/TCPEndpoint.hpp>
+#include <f1x/aasdk/TCP/TCPWrapper.hpp>
 #include <f1x/aasdk/Transport/SSLWrapper.hpp>
 #include <f1x/aasdk/Transport/USBTransport.hpp>
+#include <f1x/aasdk/Transport/TCPTransport.hpp>
 #include <f1x/aasdk/Messenger/Cryptor.hpp>
 #include <f1x/aasdk/Messenger/MessageInStream.hpp>
 #include <f1x/aasdk/Messenger/MessageOutStream.hpp>
@@ -50,40 +53,10 @@ void destroyAndroidAutoSession(AaSdkUsbSession* session) {
     delete session;
 }
 
-AaSdkUsbSessionPtr createAndroidAutoSession(
-        JNIEnv* /*env*/,
-        jobject /*serviceObj*/,
-        libusb_context* usbCtx,
-        usb::IUSBWrapper& usbWrapper,
-        int fd) {
-
-    // Wrap the Android-opened fd as a libusb handle using the shared context
-    libusb_device_handle* rawHandle = nullptr;
-    int r = libusb_wrap_sys_device(usbCtx, static_cast<intptr_t>(fd), &rawHandle);
-    if (r != LIBUSB_SUCCESS || !rawHandle) {
-        LOGE("libusb_wrap_sys_device(%d) failed: %s", fd, libusb_error_name(r));
-        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
-    }
-
-    // DeviceHandle is shared_ptr<libusb_device_handle>
-    usb::DeviceHandle deviceHandle(rawHandle, [](libusb_device_handle* h) {
-        libusb_close(h);
-    });
-
-    AaSdkUsbSessionPtr session(new AaSdkUsbSession(), destroyAndroidAutoSession);
-
-    usb::IAOAPDevice::Pointer aoapDevice;
-    try {
-        aoapDevice = usb::AOAPDevice::create(usbWrapper, session->ioService,
-                                             std::move(deviceHandle));
-    } catch (const std::exception& ex) {
-        LOGE("AOAPDevice::create: %s", ex.what());
-        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
-    }
-
-    // Build the full transport + messenger + crypto stack
-    auto transport  = std::make_shared<transport::USBTransport>(session->ioService,
-                                                                std::move(aoapDevice));
+// Builds everything above the transport (SSL/crypto/messenger/services/entity)
+// and starts the session -- shared between the USB and TCP transports, which
+// differ only in how the transport itself is constructed.
+static void finishSessionSetup(AaSdkUsbSessionPtr& session, transport::ITransport::Pointer transport) {
     auto sslWrapper = std::make_shared<transport::SSLWrapper>();
     auto cryptor    = std::make_shared<messenger::Cryptor>(std::move(sslWrapper));
     cryptor->init();
@@ -132,6 +105,67 @@ AaSdkUsbSessionPtr createAndroidAutoSession(
 
     session->entity->start();
     LOGI("AA session started");
+}
+
+AaSdkUsbSessionPtr createAndroidAutoSession(
+        JNIEnv* /*env*/,
+        jobject /*serviceObj*/,
+        libusb_context* usbCtx,
+        usb::IUSBWrapper& usbWrapper,
+        int fd) {
+
+    // Wrap the Android-opened fd as a libusb handle using the shared context
+    libusb_device_handle* rawHandle = nullptr;
+    int r = libusb_wrap_sys_device(usbCtx, static_cast<intptr_t>(fd), &rawHandle);
+    if (r != LIBUSB_SUCCESS || !rawHandle) {
+        LOGE("libusb_wrap_sys_device(%d) failed: %s", fd, libusb_error_name(r));
+        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
+    }
+
+    // DeviceHandle is shared_ptr<libusb_device_handle>
+    usb::DeviceHandle deviceHandle(rawHandle, [](libusb_device_handle* h) {
+        libusb_close(h);
+    });
+
+    AaSdkUsbSessionPtr session(new AaSdkUsbSession(), destroyAndroidAutoSession);
+
+    usb::IAOAPDevice::Pointer aoapDevice;
+    try {
+        aoapDevice = usb::AOAPDevice::create(usbWrapper, session->ioService,
+                                             std::move(deviceHandle));
+    } catch (const std::exception& ex) {
+        LOGE("AOAPDevice::create: %s", ex.what());
+        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
+    }
+
+    auto transport = std::make_shared<transport::USBTransport>(session->ioService,
+                                                                std::move(aoapDevice));
+    finishSessionSetup(session, std::move(transport));
+    return session;
+}
+
+AaSdkUsbSessionPtr createAndroidAutoSessionTcp(
+        JNIEnv* /*env*/,
+        jobject /*serviceObj*/,
+        int fd) {
+
+    AaSdkUsbSessionPtr session(new AaSdkUsbSession(), destroyAndroidAutoSession);
+
+    // Adopt the already-connected native socket fd (handed over from Java after
+    // accepting a TCP connection) into a boost::asio socket bound to this
+    // session's io_service.
+    auto socket = std::make_shared<boost::asio::ip::tcp::socket>(session->ioService);
+    boost::system::error_code ec;
+    socket->assign(boost::asio::ip::tcp::v4(), fd, ec);
+    if (ec) {
+        LOGE("tcp socket assign(fd=%d) failed: %s", fd, ec.message().c_str());
+        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
+    }
+
+    static tcp::TCPWrapper tcpWrapper;
+    auto tcpEndpoint = std::make_shared<tcp::TCPEndpoint>(tcpWrapper, std::move(socket));
+    auto transport = std::make_shared<transport::TCPTransport>(session->ioService, std::move(tcpEndpoint));
+    finishSessionSetup(session, std::move(transport));
     return session;
 }
 
@@ -141,14 +175,16 @@ void sessionSetSurface(AaSdkUsbSession* session, ANativeWindow* window) {
         ANativeWindow_release(session->pendingWindow);
         session->pendingWindow = nullptr;
     }
-    if (session->videoOut && window) {
+    if (session->videoOut) {
         // Must match VideoService's kDefaultConfigIndex resolution and
-        // InputService's advertised touchscreen size (1920x1080).
+        // InputService's advertised touchscreen size (1920x1080). A null
+        // window (surface torn down) must reach here too, not just a real
+        // one -- see AndroidVideoOutput::init()'s stop() call for why.
         session->videoOut->init(window, 1920, 1080);
-    } else {
+    } else if (window) {
         // Store for when videoOut becomes available
         session->pendingWindow = window;
-        if (window) ANativeWindow_acquire(window);
+        ANativeWindow_acquire(window);
     }
 }
 

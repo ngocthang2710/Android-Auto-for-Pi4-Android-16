@@ -7,3 +7,9 @@ prebuilt_etc {
     sub_dir: "default-permissions",
     src: "default-permissions-com.android.systemui.xml",
 }
+
+prebuilt_etc {
+    name: "default-permissions-com.android.car.aasdk.xml",
+    sub_dir: "default-permissions",
+    src: "default-permissions-com.android.car.aasdk.xml",
+}

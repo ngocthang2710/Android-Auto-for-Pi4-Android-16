@@ -12,12 +12,23 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Binder
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.Surface
+import java.io.IOException
+import java.net.ServerSocket
+
+// Matches VideoService::kDefaultConfigIndex (see AndroidVideoOutput's callers) --
+// the decoder always configures at this resolution regardless of the phone/screen.
+private const val VIDEO_WIDTH = 1920
+private const val VIDEO_HEIGHT = 1080
 
 private const val TAG = "AaSdk_Svc"
 private const val NOTIF_ID = 1
 private const val CHANNEL_ID = "aasdk_channel"
+// Same TCP port real Android Auto Wireless projection connects to, so this
+// listener stays compatible with a future Bluetooth WiFi-handoff handshake.
+private const val WIFI_PROJECTION_PORT = 5288
 
 class AaSdkUsbService : Service() {
 
@@ -34,6 +45,7 @@ class AaSdkUsbService : Service() {
     private external fun nativeDestroy(handle: Long)
     private external fun nativeOnAccessoryAttached(handle: Long, fd: Int)
     private external fun nativeOnAccessoryDetached(handle: Long)
+    private external fun nativeOnTcpAccepted(handle: Long, fd: Int)
     private external fun nativeSetSurface(handle: Long, surface: Surface?)
     private external fun nativeSendTouchEvent(handle: Long, action: Int, x: Float, y: Float)
 
@@ -51,6 +63,16 @@ class AaSdkUsbService : Service() {
     private var usbConnection: android.hardware.usb.UsbDeviceConnection? = null
     private var attachedDevice: UsbDevice? = null
     private var detachListener: DetachListener? = null
+    private var wifiServerSocket: ServerSocket? = null
+    private var wifiAcceptThread: Thread? = null
+    private val softAp = AaSdkSoftApHotspot(this)
+    private val btWireless = AaSdkBtWirelessHandshake(softAp)
+
+    // Decodes into a permanent SurfaceTexture and blits each frame onto
+    // whatever on-screen Surface AaSdkScreenActivity currently provides --
+    // see VideoBlitter's kdoc for why the decoder's own output target must
+    // never change or be swapped on this device.
+    private var videoBlitter: VideoBlitter? = null
 
     fun setDetachListener(listener: DetachListener?) {
         detachListener = listener
@@ -71,7 +93,20 @@ class AaSdkUsbService : Service() {
         startForeground(NOTIF_ID, buildNotification())
         nativeHandle = nativeCreate()
         if (nativeHandle == 0L) Log.e(TAG, "nativeCreate failed")
+        val blitter = VideoBlitter(VIDEO_WIDTH, VIDEO_HEIGHT)
+        videoBlitter = blitter
+        if (nativeHandle != 0L) nativeSetSurface(nativeHandle, blitter.getInputSurface())
         registerReceiver(detachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
+        startWifiListener()
+        // Starting this does NOT turn on the AP by itself -- AaSdkBtWirelessHandshake
+        // only starts AaSdkSoftApHotspot once a phone actually BT-connects asking
+        // for wireless AA, so a plain wired-USB session never touches WiFi.
+        btWireless.start(WIFI_PROJECTION_PORT)
+    }
+
+    /** Called by AaSdkScreenActivity with its current Surface, or null when torn down. */
+    fun attachDisplaySurface(surface: Surface?) {
+        videoBlitter?.setOutputSurface(surface)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -84,6 +119,8 @@ class AaSdkUsbService : Service() {
 
     override fun onDestroy() {
         unregisterReceiver(detachReceiver)
+        stopWifiListener()
+        btWireless.stop() // also tears down the AP if one is up (see its own stop())
         usbConnection?.close()
         usbConnection = null
         if (nativeHandle != 0L) {
@@ -93,16 +130,53 @@ class AaSdkUsbService : Service() {
         super.onDestroy()
     }
 
+    // Accepts wireless-projection TCP connections and hands each one to the
+    // same native session slot USB uses (createAndroidAutoSessionTcp). This is
+    // a secondary, optional path -- any failure here must stay contained to
+    // this thread and never take down the service (and with it the USB
+    // flow), so this catches Throwable rather than just IOException.
+    private fun startWifiListener() {
+        wifiAcceptThread = Thread {
+            try {
+                ServerSocket(WIFI_PROJECTION_PORT).use { server ->
+                    wifiServerSocket = server
+                    Log.i(TAG, "WiFi AA listener on port $WIFI_PROJECTION_PORT")
+                    while (!Thread.currentThread().isInterrupted) {
+                        val socket = server.accept()
+                        Log.i(TAG, "TCP client connected: ${socket.inetAddress}")
+                        val fd = ParcelFileDescriptor.fromSocket(socket).detachFd()
+                        socket.close()
+                        if (nativeHandle != 0L) {
+                            nativeOnTcpAccepted(nativeHandle, fd)
+                            startActivity(Intent(this, AaSdkScreenActivity::class.java).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            })
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "WiFi listener stopped: ${e.message}", e)
+            }
+        }.apply { isDaemon = true; start() }
+    }
+
+    private fun stopWifiListener() {
+        wifiAcceptThread?.interrupt()
+        try {
+            wifiServerSocket?.close()
+        } catch (e: IOException) {
+            // already closed
+        }
+        wifiServerSocket = null
+        wifiAcceptThread = null
+    }
+
     private fun onAccessoryDetached() {
         if (nativeHandle != 0L) nativeOnAccessoryDetached(nativeHandle)
         usbConnection?.close()
         usbConnection = null
         attachedDevice = null
         detachListener?.onAccessoryDetached()
-    }
-
-    fun setSurface(surface: Surface?) {
-        if (nativeHandle != 0L) nativeSetSurface(nativeHandle, surface)
     }
 
     fun sendTouchEvent(action: Int, x: Float, y: Float) {

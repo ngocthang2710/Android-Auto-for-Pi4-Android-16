@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+
+<!--
+    BLUETOOTH_ADVERTISE is a dangerous/runtime permission (unlike
+    NETWORK_SETTINGS, which is signature|privileged and belongs in
+    packages/apps/AaSdkUsbBridge/com.android.car.aasdk.xml's privapp-permissions
+    allowlist instead) -- AaSdkBtWirelessHandshake's
+    listenUsingRfcommWithServiceRecord() registers an SDP record, which needs
+    it on top of BLUETOOTH_CONNECT.
+-->
+<exceptions>
+    <exception package="com.android.car.aasdk">
+      <permission name="android.permission.BLUETOOTH_ADVERTISE" fixed="false"/>
+    </exception>
+</exceptions>

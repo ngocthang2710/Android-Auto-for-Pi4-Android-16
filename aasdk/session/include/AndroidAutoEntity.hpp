@@ -47,6 +47,7 @@ public:
     void onShutdownRequest(const f1x::aasdk::proto::messages::ShutdownRequest& req) override;
     void onShutdownResponse(const f1x::aasdk::proto::messages::ShutdownResponse& resp) override;
     void onNavigationFocusRequest(const f1x::aasdk::proto::messages::NavigationFocusRequest& req) override;
+    void onPingRequest(const f1x::aasdk::proto::messages::PingRequest& req) override;
     void onPingResponse(const f1x::aasdk::proto::messages::PingResponse& resp) override;
     void onChannelError(const f1x::aasdk::error::Error& e) override;
 

@@ -227,6 +227,23 @@ void AndroidAutoEntity::onNavigationFocusRequest(
     controlChannel_->receive(shared_from_this());
 }
 
+void AndroidAutoEntity::onPingRequest(const proto::messages::PingRequest& req) {
+    // Wireless AA pings in both directions (unlike wired, where only the head
+    // unit pings the phone via Pinger) -- confirmed live: this request was
+    // previously unhandled ("message not handled: 11" in ControlServiceChannel),
+    // and the phone tore down the whole TCP session ~2.7s after sending it and
+    // getting no reply, right after service discovery/audio focus succeeded.
+    LOGI("ping request timestamp=%lld", (long long)req.timestamp());
+    proto::messages::PingResponse resp;
+    resp.set_timestamp(req.timestamp());
+    auto promise = channel::SendPromise::defer(strand_);
+    promise->then([]() { LOGI("ping response sent OK"); },
+                  std::bind(&AndroidAutoEntity::onChannelError, shared_from_this(),
+                            std::placeholders::_1));
+    controlChannel_->sendPingResponse(resp, std::move(promise));
+    controlChannel_->receive(shared_from_this());
+}
+
 void AndroidAutoEntity::onPingResponse(const proto::messages::PingResponse&) {
     LOGI("ping response");
     controlChannel_->receive(shared_from_this());

@@ -2,6 +2,7 @@
 #include <media/NdkMediaCodec.h>
 #include <android/native_window.h>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace aasdk_android {
@@ -33,12 +34,20 @@ public:
     void stop();
 
 private:
+    // Guards codec_/window_/started_, which are otherwise touched from two
+    // unsynchronized threads: init()/stop() from the JNI thread (Activity
+    // surface lifecycle) and write() from the video channel's io_service
+    // strand (a different worker thread).
+    std::mutex mutex_;
     AMediaCodec* codec_{nullptr};
     ANativeWindow* window_{nullptr};
     bool started_{false};
+    long long writeCount_{0};
+    long long outputBufferCount_{0};
 
     bool queueInput(const uint8_t* data, size_t size);
     void drainOutput();
+    void stopLocked();
 };
 
 } // namespace aasdk_android

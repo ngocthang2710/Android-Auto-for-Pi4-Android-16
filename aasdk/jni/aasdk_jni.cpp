@@ -98,11 +98,52 @@ Java_com_android_car_aasdk_AaSdkUsbService_nativeOnAccessoryAttached(
 
     if (!ctx->session) { LOGE("session create failed"); return; }
 
-    // Apply any surface that arrived before the phone was attached
+    // Apply the latest known-good surface (may predate this session, or be
+    // left over from a still-visible screen whose session just got
+    // replaced) -- kept cached rather than consumed, see nativeSetSurface().
     if (ctx->pendingWindow) {
         sessionSetSurface(ctx->session.get(), ctx->pendingWindow);
-        ANativeWindow_release(ctx->pendingWindow);
-        ctx->pendingWindow = nullptr;
+    }
+}
+
+// Called from Java after accepting a TCP connection on the wireless-projection
+// listener socket. fd is a connected native socket fd (see
+// ParcelFileDescriptor.detachFd() on the Java side). Shares the same
+// single-session slot as USB.
+//
+// A new TCP accept while a session is already running means the previous
+// connection is no longer wanted by the phone (it wouldn't be retrying the
+// whole BT+WiFi handshake otherwise) -- tear down the stale session instead
+// of rejecting the new one. Rejecting used to leak the new fd (nothing ever
+// closed it, since ownership was already handed over via detachFd() on the
+// Java side) and left the phone's new TCP connection unanswered, which it
+// read as a hang and retried forever.
+JNIEXPORT void JNICALL
+Java_com_android_car_aasdk_AaSdkUsbService_nativeOnTcpAccepted(
+        JNIEnv* env, jobject serviceObj, jlong handle, jint fd) {
+    auto* ctx = reinterpret_cast<NativeContext*>(handle);
+    if (!ctx) { LOGE("null ctx"); return; }
+
+    std::lock_guard<std::mutex> lk(ctx->mu);
+    if (ctx->session) {
+        LOGI("replacing stale session for new TCP connection");
+        ctx->session.reset();
+    }
+
+    ctx->session = createAndroidAutoSessionTcp(env, serviceObj, static_cast<int>(fd));
+
+    if (!ctx->session) { LOGE("tcp session create failed"); return; }
+
+    // Apply the latest known-good surface -- kept cached rather than
+    // consumed. This matters a lot here specifically: a phone-initiated
+    // reconnect (new BT+WiFi handshake -> new TCP accept) can replace the
+    // session while AaSdkScreenActivity is still resumed with its Surface
+    // untouched, so Kotlin never re-fires surfaceChanged/nativeSetSurface
+    // for the new session -- without this cache, the new session's
+    // videoOut would never get a window at all (session decrypts/decodes
+    // fine, screen just stays black forever).
+    if (ctx->pendingWindow) {
+        sessionSetSurface(ctx->session.get(), ctx->pendingWindow);
     }
 }
 
@@ -130,12 +171,18 @@ Java_com_android_car_aasdk_AaSdkUsbService_nativeSetSurface(
 
     ANativeWindow* newWin = surface ? ANativeWindow_fromSurface(env, surface) : nullptr;
 
+    // Always cache the latest known-good window, not just when no session
+    // exists yet. A session can be replaced later (TCP reconnect, USB
+    // re-attach) while this exact Surface is still alive and unchanged --
+    // Kotlin only re-fires surfaceChanged/nativeSetSurface when the Surface
+    // itself is torn down and recreated, not when the native session
+    // underneath it gets swapped out, so the next session needs this cache
+    // to find out about a surface it was never directly told about.
+    if (ctx->pendingWindow) ANativeWindow_release(ctx->pendingWindow);
+    ctx->pendingWindow = newWin;
+
     if (ctx->session) {
         sessionSetSurface(ctx->session.get(), newWin);
-    } else {
-        // Cache for when session starts
-        if (ctx->pendingWindow) ANativeWindow_release(ctx->pendingWindow);
-        ctx->pendingWindow = newWin;
     }
 }
 

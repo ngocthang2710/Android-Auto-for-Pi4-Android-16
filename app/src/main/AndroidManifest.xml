@@ -4,10 +4,25 @@
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- For the wireless-projection TCP listener in AaSdkUsbService. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- listenUsingRfcommWithServiceRecord registers an SDP record, which
+         needs BLUETOOTH_ADVERTISE on top of BLUETOOTH_CONNECT. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- registerSoftApCallback (AaSdkSoftApHotspot) requires NETWORK_SETTINGS. -->
+    <uses-permission android:name="android.permission.NETWORK_SETTINGS" />
+    <!-- TetheringManager.startTethering/stopTethering (AaSdkSoftApHotspot):
+         this is what actually provisions the AP interface's IP/DHCP, which
+         WifiManager.startTetheredHotspot() alone does not do. See
+         com.android.car.aasdk.xml for why this needs a privapp allowlist
+         entry (signature|privileged) on top of this manifest declaration. -->
+    <uses-permission android:name="android.permission.TETHER_PRIVILEGED" />
     <!-- Lets CarUsbHandler recognize this app as an AOAP handler and auto-select
          it (skipping its multi-app disambiguation dialog) instead of just a
          generic usb-device handler. See AaSdkAoapService/device_filter.xml. -->
@@ -15,7 +30,7 @@
 
     <application
         android:label="Android Auto HU"
-        android:icon="@android:drawable/ic_media_play">
+        android:icon="@mipmap/ic_launcher">
 
         <!-- Receives USB_DEVICE_ATTACHED, handles AOAP mode switch -->
         <activity

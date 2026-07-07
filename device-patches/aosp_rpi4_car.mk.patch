@@ -1,5 +1,5 @@
 diff --git a/aosp_rpi4_car.mk b/aosp_rpi4_car.mk
-index 764b347..8e61199 100644
+index 764b347..9b8d7d8 100644
 --- a/aosp_rpi4_car.mk
 +++ b/aosp_rpi4_car.mk
 @@ -25,6 +25,10 @@ PRODUCT_PACKAGES += \
@@ -22,7 +22,7 @@ index 764b347..8e61199 100644
      bluetooth.profile.hid.device.enabled=false \
      bluetooth.profile.hid.host.enabled=false \
      bluetooth.profile.map.server.enabled=false \
-@@ -116,6 +120,15 @@ PRODUCT_COPY_FILES += \
+@@ -116,6 +120,23 @@ PRODUCT_COPY_FILES += \
  PRODUCT_PACKAGES += \
      android.hardware.automotive.vehicle@V4-default-service
  
@@ -34,6 +34,14 @@ index 764b347..8e61199 100644
 +# device/brcm/rpi4/permissions/default-permissions-com.android.systemui.xml)
 +PRODUCT_PACKAGES += \
 +    default-permissions-com.android.systemui.xml
++
++# AaSdkUsbBridge's BT wireless-projection handshake needs BLUETOOTH_ADVERTISE
++# to register its RFCOMM SDP record (see
++# device/brcm/rpi4/permissions/default-permissions-com.android.car.aasdk.xml).
++# NETWORK_SETTINGS is separate: it's signature|privileged, so it's allowlisted
++# in packages/apps/AaSdkUsbBridge/com.android.car.aasdk.xml instead.
++PRODUCT_PACKAGES += \
++    default-permissions-com.android.car.aasdk.xml
 +
  # Device identifier. This must come after all inclusions.
  PRODUCT_DEVICE := rpi4
