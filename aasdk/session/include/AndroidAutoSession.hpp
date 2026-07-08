@@ -44,4 +44,13 @@ AaSdkUsbSessionPtr createAndroidAutoSessionTcp(
 void sessionSetSurface(AaSdkUsbSession* session, ANativeWindow* window);
 void sessionSendTouchEvent(AaSdkUsbSession* session, int action, float x, float y);
 
+// Polled from Java (see AaSdkUsbService's fatal-error check loop) rather than
+// pushed via a native->Java callback: AndroidAutoEntity's watchdog fires on
+// one of this session's own io_service worker threads, and safely calling
+// back into Java from there would need a JavaVM attach/detach dance this
+// tree doesn't otherwise use anywhere. A plain atomic flag, read-and-cleared
+// from Java's own thread, avoids that entirely. Returns true at most once
+// per fatal event (exchange-and-clear).
+bool sessionCheckAndConsumeFatalError(AaSdkUsbSession* session);
+
 } // namespace aasdk_android

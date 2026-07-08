@@ -11,7 +11,9 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Binder
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.Surface
@@ -29,6 +31,9 @@ private const val CHANNEL_ID = "aasdk_channel"
 // Same TCP port real Android Auto Wireless projection connects to, so this
 // listener stays compatible with a future Bluetooth WiFi-handoff handshake.
 private const val WIFI_PROJECTION_PORT = 5288
+// Matches AndroidAutoEntity::kWatchdogIntervalMs -- no point polling faster
+// than the native watchdog itself can possibly flag a new fatal event.
+private const val FATAL_CHECK_INTERVAL_MS = 2000L
 
 class AaSdkUsbService : Service() {
 
@@ -49,6 +54,7 @@ class AaSdkUsbService : Service() {
     private external fun nativeSetSurface(handle: Long, surface: Surface?)
     private external fun nativeSendTouchEvent(handle: Long, action: Int, x: Float, y: Float)
     private external fun nativeResetSession(handle: Long)
+    private external fun nativeCheckFatalError(handle: Long): Boolean
 
     inner class LocalBinder : Binder() {
         fun getService() = this@AaSdkUsbService
@@ -75,6 +81,24 @@ class AaSdkUsbService : Service() {
     // never change or be swapped on this device.
     private var videoBlitter: VideoBlitter? = null
 
+    // Confirmed live 2026-07-08: a session can go transport-dead (repeated
+    // SSL_READ/WRITE errors, zero ping responses) with no USB detach
+    // broadcast at all -- nothing else notices, so the HU sits frozen on
+    // the last rendered frame until manually unplugged/replugged. The
+    // native watchdog (AndroidAutoEntity) now detects this and stops
+    // itself internally, but can't reach the UI on its own -- poll for
+    // that flag and treat it exactly like an accessory detach.
+    private val fatalCheckHandler = Handler(Looper.getMainLooper())
+    private val fatalCheckRunnable = object : Runnable {
+        override fun run() {
+            if (nativeHandle != 0L && nativeCheckFatalError(nativeHandle)) {
+                Log.e(TAG, "Native session reported fatal transport error, tearing down")
+                onAccessoryDetached()
+            }
+            fatalCheckHandler.postDelayed(this, FATAL_CHECK_INTERVAL_MS)
+        }
+    }
+
     fun setDetachListener(listener: DetachListener?) {
         detachListener = listener
     }
@@ -98,6 +122,7 @@ class AaSdkUsbService : Service() {
         videoBlitter = blitter
         if (nativeHandle != 0L) nativeSetSurface(nativeHandle, blitter.getInputSurface())
         registerReceiver(detachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
+        fatalCheckHandler.postDelayed(fatalCheckRunnable, FATAL_CHECK_INTERVAL_MS)
         startWifiListener()
         // Starting this does NOT turn on the AP by itself -- AaSdkBtWirelessHandshake
         // only starts AaSdkSoftApHotspot once a phone actually BT-connects asking
@@ -147,6 +172,7 @@ class AaSdkUsbService : Service() {
 
     override fun onDestroy() {
         unregisterReceiver(detachReceiver)
+        fatalCheckHandler.removeCallbacks(fatalCheckRunnable)
         stopWifiListener()
         btWireless.stop() // also tears down the AP if one is up (see its own stop())
         usbConnection?.close()

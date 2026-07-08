@@ -209,6 +209,19 @@ Java_com_android_car_aasdk_AaSdkUsbService_nativeSetSurface(
     }
 }
 
+// Polled periodically from Java (see AaSdkUsbService's fatal-error check
+// loop) instead of pushed via a native->Java callback -- see
+// sessionCheckAndConsumeFatalError's own comment for why. Returns true at
+// most once per fatal event; safe to call with no session (returns false).
+JNIEXPORT jboolean JNICALL
+Java_com_android_car_aasdk_AaSdkUsbService_nativeCheckFatalError(
+        JNIEnv*, jobject, jlong handle) {
+    auto* ctx = reinterpret_cast<NativeContext*>(handle);
+    if (!ctx) return JNI_FALSE;
+    std::lock_guard<std::mutex> lk(ctx->mu);
+    return sessionCheckAndConsumeFatalError(ctx->session.get()) ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL
 Java_com_android_car_aasdk_AaSdkUsbService_nativeSendTouchEvent(
         JNIEnv*, jobject, jlong handle, jint action, jfloat x, jfloat y) {
