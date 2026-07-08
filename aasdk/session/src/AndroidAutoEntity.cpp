@@ -35,6 +35,7 @@ AndroidAutoEntity::AndroidAutoEntity(
     , messenger_(std::move(messenger))
     , controlChannel_(std::make_shared<channel::control::ControlServiceChannel>(strand_, messenger_))
     , pinger_(std::make_shared<Pinger>(ios, controlChannel_))
+    , watchdog_(ios)
     , videoSvc_(std::move(videoSvc))
     , mediaSvc_(std::move(mediaSvc))
     , speechSvc_(std::move(speechSvc))
@@ -63,9 +64,20 @@ void AndroidAutoEntity::start() {
     });
 }
 
+void AndroidAutoEntity::setFatalErrorCallback(std::function<void()> cb) {
+    fatalErrorCallback_ = std::move(cb);
+}
+
 void AndroidAutoEntity::stop() {
+    // Idempotent: the watchdog below and a genuine ShutdownRequest/Response
+    // (or a version mismatch) can now both call stop() for the same
+    // session; without this guard the second call would double-cancel/
+    // double-deinit things that aren't necessarily safe to touch twice.
+    if (stopped_.exchange(true)) return;
     strand_.dispatch([this, self = shared_from_this()]() {
         LOGI("stop");
+        boost::system::error_code ec;
+        watchdog_.cancel(ec);
         pinger_->cancel();
         videoSvc_->stop();
         mediaSvc_->stop();
@@ -117,6 +129,8 @@ void AndroidAutoEntity::onHandshake(const common::DataConstBuffer& payload) {
                                     std::placeholders::_1));
             controlChannel_->sendAuthComplete(authOk, std::move(promise));
             pinger_->start();
+            lastPongTime_ = std::chrono::steady_clock::now();
+            scheduleWatchdog();
         }
         controlChannel_->receive(shared_from_this());
     } catch (const error::Error& e) { onChannelError(e); }
@@ -246,11 +260,42 @@ void AndroidAutoEntity::onPingRequest(const proto::messages::PingRequest& req) {
 
 void AndroidAutoEntity::onPingResponse(const proto::messages::PingResponse&) {
     LOGI("ping response");
+    lastPongTime_ = std::chrono::steady_clock::now();
     controlChannel_->receive(shared_from_this());
 }
 
+void AndroidAutoEntity::scheduleWatchdog() {
+    watchdog_.expires_after(std::chrono::milliseconds(kWatchdogIntervalMs));
+    watchdog_.async_wait(strand_.wrap([this, self = shared_from_this()]
+                                      (const boost::system::error_code& ec) {
+        if (ec || stopped_.load()) return; // cancelled (e.g. by stop()) or already stopped
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - lastPongTime_).count();
+        if (elapsedMs > kFatalTimeoutMs) {
+            LOGE("no ping response for %lldms -- transport considered fatally dead, stopping",
+                 (long long)elapsedMs);
+            auto cb = fatalErrorCallback_;
+            stop();
+            if (cb) cb();
+            return;
+        }
+        scheduleWatchdog();
+    }));
+}
+
 void AndroidAutoEntity::onChannelError(const error::Error& e) {
+    // Live-confirmed 2026-07-08: this used to just log and stop -- the
+    // control channel's receive loop only re-arms itself from each message
+    // handler (see onPingRequest/onServiceDiscoveryRequest/etc. above, all
+    // ending in controlChannel_->receive(...)), so a single transient error
+    // (e.g. MESSENGER_INTERTWINED_CHANNELS) permanently silenced this
+    // channel: outbound sends (Pinger, touch) kept "succeeding" locally
+    // forever after, while nothing arriving from the phone (ping responses,
+    // new requests) was ever processed again -- a session that looks alive
+    // but is actually deaf. Re-arm so a transient error can recover instead
+    // of silently killing the control channel for the rest of the session.
     LOGE("control channel error: %s", e.what());
+    controlChannel_->receive(shared_from_this());
 }
 
 } // namespace aasdk_android

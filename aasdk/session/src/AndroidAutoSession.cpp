@@ -22,6 +22,7 @@
 #include <boost/asio.hpp>
 #include <thread>
 #include <vector>
+#include <atomic>
 #include <android/log.h>
 
 #define LOG_TAG "AaSdk_Session"
@@ -40,6 +41,13 @@ struct AaSdkUsbSession {
     std::shared_ptr<AndroidVideoOutput> videoOut;
     std::shared_ptr<InputService> inputSvc;
     ANativeWindow* pendingWindow{nullptr};
+    // Set by AndroidAutoEntity's watchdog (via setFatalErrorCallback) on its
+    // own strand/worker thread; read-and-cleared by Java's poll thread
+    // through sessionCheckAndConsumeFatalError(). Safe without extra
+    // synchronization: this object outlives the callback (the destructor
+    // below joins all workers, including whichever one might be mid-callback,
+    // before the object itself goes away).
+    std::atomic<bool> fatalError{false};
 
     ~AaSdkUsbSession() {
         if (entity) { entity->stop(); entity.reset(); }
@@ -95,6 +103,10 @@ static void finishSessionSetup(AaSdkUsbSessionPtr& session, transport::ITranspor
         session->inputSvc,
         std::move(btSvc),
         std::move(avInputSvc));
+
+    session->entity->setFatalErrorCallback([s = session.get()]() {
+        s->fatalError.store(true, std::memory_order_relaxed);
+    });
 
     // 4 IO threads: prevents AAudio blocking in one channel from starving others
     for (int i = 0; i < 4; ++i) {
@@ -192,6 +204,11 @@ void sessionSendTouchEvent(AaSdkUsbSession* session, int action, float x, float 
     if (session && session->inputSvc) {
         session->inputSvc->injectTouchEvent(action, x, y);
     }
+}
+
+bool sessionCheckAndConsumeFatalError(AaSdkUsbSession* session) {
+    if (!session) return false;
+    return session->fatalError.exchange(false, std::memory_order_relaxed);
 }
 
 } // namespace aasdk_android
