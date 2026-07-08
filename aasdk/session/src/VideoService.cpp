@@ -32,35 +32,40 @@ void VideoService::stop() {
 }
 
 namespace {
-// Real screen is 1920x1080; a phone connecting to this head unit was
-// observed requesting AVChannelSetupRequest.config_index=3 even though we
-// used to advertise (and locally decode at) only one 800x480 entry --
-// config_index=3 coincides with VideoResolution._1080p's own enum value,
-// and the phone appears to encode at whatever resolution it wants
-// regardless of what we say we support (MediaCodec/SurfaceFlinger silently
-// upscale to fill the Surface, hiding the mismatch visually). Advertise and
-// honor all four standard tiers so config_index (however the phone
-// interprets it: list position or resolution enum) always resolves to a
-// real, matching width/height -- critical for touch coordinates, which
-// have no equivalent auto-correction.
+// Real screen is 1920x1080. onAVChannelSetupRequest() below never actually
+// indexes this array by req.config_index() -- it always renders at
+// kDefaultConfigIndex regardless of what the phone asks for -- so the only
+// thing that matters about this list is what GearHead itself does with it.
+//
+// Confirmed live (phone-side logcat via wireless adb debugging, 2026-07-08):
+// GearHead's own window manager (CAR.WM) locks its *entire* window/touch
+// layout to list index 0 of this array -- "DisplayParams(selectedIndex=0,
+// codecWidth=800, codecHeight=480 ... dpi=92)" matched the old {800,480,92}
+// first entry exactly, and every Dashboard/GhFacetBar window it created
+// stayed confined to that ~800x480 canvas for the entire live session (not
+// just the startup loading screen). Meanwhile AVChannelSetupRequest.config_index
+// was 3 for the actual video codec negotiation -- a *different* GearHead
+// subsystem reading the *same* list with different semantics. With four
+// tiers, those two never agreed on a resolution, so every touch coordinate
+// (sent in the 1920x1080 space InputService/VideoService/AaSdkScreenActivity
+// all use) fell far outside GearHead's own ~800x480 window bounds --
+// "UpDown touch event (x,y) does not correspond to a window" for every
+// single touch, regardless of screen crashes or channel errors.
+//
+// Fix: collapse to the one resolution we actually ever render, at index 0,
+// so whichever subsystem reads "index 0" or "the tier we asked for" lands on
+// the same 1920x1080 GearHead uses for its own window layout and we use for
+// touch. dpi = diagonal_px / 10.1in (matches a common Pi touchscreen size).
 struct VideoConfigEntry { int width; int height; int dpi; proto::enums::VideoResolution::Enum resolution; };
-// dpi = diagonal_px / 10.1in, matching a common Pi touchscreen size, so
-// each entry stays internally consistent (dpi=140 was tuned for the old
-// 800x480 entry alone -- reusing it unchanged for 1920x1080 implied an
-// unrealistic ~15.7in screen, which can throw off any touch/UI scaling
-// GearHead derives from resolution+dpi together).
 // margin_height was tried here to reserve space for AAOS's
 // BottomCarSystemBar but the phone applied it as a TOP inset instead
 // (confirmed visually), so the bottom-bar overlap is now handled purely
 // on the HU side instead: AaSdkScreenActivity sizes its SurfaceView to
 // avoid the bar directly, no protocol-level margin needed.
 constexpr VideoConfigEntry kVideoConfigs[] = {
-    {800, 480, 92, proto::enums::VideoResolution::_480p},
-    {1280, 720, 145, proto::enums::VideoResolution::_720p},
-    {1600, 900, 182, proto::enums::VideoResolution::_1080p},
     {1920, 1080, 218, proto::enums::VideoResolution::_1080p},
 };
-constexpr size_t kDefaultConfigIndex = 3; // 1920x1080, matches this head unit's real screen
+constexpr size_t kDefaultConfigIndex = 0; // the only entry: 1920x1080, matches this head unit's real screen
 } // namespace
 
 void VideoService::fillFeatures(proto::messages::ServiceDiscoveryResponse& resp) {
@@ -196,7 +201,12 @@ void VideoService::onVideoFocusRequest(const proto::messages::VideoFocusRequest&
 }
 
 void VideoService::onChannelError(const error::Error& e) {
+    // See AndroidAutoEntity::onChannelError for why this re-arm is required
+    // -- without it, a single transient receive error permanently stops new
+    // video frames from ever being processed again (session looks alive,
+    // screen just never updates again).
     LOGE("channel error: %s", e.what());
+    channel_->receive(shared_from_this());
 }
 
 } // namespace aasdk_android

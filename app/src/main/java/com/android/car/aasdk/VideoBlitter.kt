@@ -91,6 +91,10 @@ class VideoBlitter(private val width: Int, private val height: Int) {
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglConfig: EGLConfig? = null
     private var outputSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+    // Kept current on this thread whenever no real on-screen surface is
+    // attached -- see setOutputSurface()'s detach branch for why this must
+    // never be EGL_NO_CONTEXT/EGL_NO_SURFACE instead.
+    private var pbufferSurface: EGLSurface = EGL14.EGL_NO_SURFACE
     // The on-screen surface's own pixel size -- NOT the same as width/height
     // above (the decoder's fixed 1920x1080 output resolution). AaSdkScreenActivity
     // pillarboxes its SurfaceView to a smaller on-screen box (e.g. 1664x936),
@@ -147,16 +151,45 @@ class VideoBlitter(private val width: Int, private val height: Int) {
     fun setOutputSurface(surface: Surface?) {
         handler.post {
             if (outputSurface != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglMakeCurrent(
-                    eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                // Fall back to the persistent pbuffer rather than
+                // EGL_NO_CONTEXT: the decoder keeps producing frames in the
+                // background even with no on-screen surface attached (see
+                // AndroidVideoOutput's kdoc), and onFrameAvailable() below
+                // unconditionally calls decodeTexture.updateTexImage(),
+                // which throws IllegalStateException with no GL context
+                // current on this thread -- an uncaught exception on this
+                // HandlerThread crashes the whole process. Confirmed live:
+                // recurring "FATAL EXCEPTION: AaSdkVideoBlit ... Unable to
+                // update texture contents" crashes, always right after an
+                // "Output surface detached" log line.
+                EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)
                 EGL14.eglDestroySurface(eglDisplay, outputSurface)
                 outputSurface = EGL14.EGL_NO_SURFACE
             }
-            if (surface != null) {
-                outputSurface = EGL14.eglCreateWindowSurface(
-                    eglDisplay, eglConfig, surface, intArrayOf(EGL14.EGL_NONE), 0)
+            if (surface != null && !surface.isValid) {
+                // Surface died between the Activity posting this call and the
+                // GL thread actually running it (e.g. Activity torn down/
+                // recreated mid-handshake) -- eglCreateWindowSurface below
+                // would throw for the same reason isValid() is already false.
+                Log.e(TAG, "Output surface no longer valid, skipping attach")
+            } else if (surface != null) {
+                outputSurface = try {
+                    EGL14.eglCreateWindowSurface(
+                        eglDisplay, eglConfig, surface, intArrayOf(EGL14.EGL_NONE), 0)
+                } catch (e: IllegalArgumentException) {
+                    // Confirmed live: "Make sure the SurfaceView or associated
+                    // SurfaceHolder has a valid Surface" -- same race as the
+                    // isValid() check above, just lost narrowly: the Surface
+                    // went invalid in between. Uncaught, this throws on the
+                    // dedicated AaSdkVideoBlit HandlerThread and kills the
+                    // whole process (not just this attach attempt).
+                    Log.e(TAG, "eglCreateWindowSurface threw: ${e.message}")
+                    EGL14.EGL_NO_SURFACE
+                }
                 if (outputSurface == EGL14.EGL_NO_SURFACE) {
-                    Log.e(TAG, "eglCreateWindowSurface failed: 0x${Integer.toHexString(EGL14.eglGetError())}")
+                    if (EGL14.eglGetError() != EGL14.EGL_SUCCESS) {
+                        Log.e(TAG, "eglCreateWindowSurface failed: 0x${Integer.toHexString(EGL14.eglGetError())}")
+                    }
                 } else {
                     val dims = IntArray(2)
                     EGL14.eglQuerySurface(eglDisplay, outputSurface, EGL14.EGL_WIDTH, dims, 0)
@@ -257,8 +290,8 @@ class VideoBlitter(private val width: Int, private val height: Int) {
         // Texture creation/attachment below needs a current context, even
         // though we have no window surface yet -- use a 1x1 pbuffer.
         val pbufferAttribs = intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE)
-        val pbuffer = EGL14.eglCreatePbufferSurface(eglDisplay, eglConfig, pbufferAttribs, 0)
-        EGL14.eglMakeCurrent(eglDisplay, pbuffer, pbuffer, eglContext)
+        pbufferSurface = EGL14.eglCreatePbufferSurface(eglDisplay, eglConfig, pbufferAttribs, 0)
+        EGL14.eglMakeCurrent(eglDisplay, pbufferSurface, pbufferSurface, eglContext)
     }
 
     private fun createExternalTexture(): Int {
