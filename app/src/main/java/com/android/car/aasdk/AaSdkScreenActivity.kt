@@ -9,7 +9,6 @@ import android.os.IBinder
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.ViewGroup
@@ -27,6 +26,12 @@ private const val TAG = "AaSdk_Screen"
 private const val AA_ASPECT_W = 1920f
 private const val AA_ASPECT_H = 1080f
 
+// This Surface is purely a disposable on-screen blit target -- VideoBlitter
+// (owned by the Service) decodes into its own permanent SurfaceTexture and
+// draws each frame here via GL, so this Surface can be freely torn down and
+// recreated on every exit/reenter without touching the decoder at all. See
+// VideoBlitter's kdoc for the two approaches that were tried and failed
+// before landing on this one.
 class AaSdkScreenActivity : Activity(), SurfaceHolder.Callback {
 
     private var service: AaSdkUsbService? = null
@@ -34,10 +39,16 @@ class AaSdkScreenActivity : Activity(), SurfaceHolder.Callback {
     private var surfaceWidth = 0
     private var surfaceHeight = 0
 
+    // Set once the surface has been torn down at least once (surfaceDestroyed
+    // fires when the HU backgrounds this Activity, e.g. Home then reopen).
+    // The *next* surfaceChanged after that is a genuine re-entry, not the
+    // Activity's first-ever attach -- only then do we force a fresh session.
+    private var wasBackgrounded = false
+
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as AaSdkUsbService.LocalBinder).getService()
-            surfaceView?.holder?.surface?.let { service?.setSurface(it) }
+            surfaceView?.holder?.surface?.let { service?.attachDisplaySurface(it) }
             service?.setDetachListener { goHomeAndFinish() }
         }
         override fun onServiceDisconnected(name: ComponentName?) { service = null }
@@ -105,7 +116,7 @@ class AaSdkScreenActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         service?.setDetachListener(null)
-        service?.setSurface(null)
+        service?.attachDisplaySurface(null)
         unbindService(conn)
         super.onDestroy()
     }
@@ -117,11 +128,16 @@ class AaSdkScreenActivity : Activity(), SurfaceHolder.Callback {
         Log.d(TAG, "surfaceChanged ${width}x${height}")
         surfaceWidth = width
         surfaceHeight = height
-        service?.setSurface(holder.surface)
+        if (wasBackgrounded) {
+            wasBackgrounded = false
+            service?.resetWirelessSessionForReentry()
+        }
+        service?.attachDisplaySurface(holder.surface)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        service?.setSurface(null)
+        wasBackgrounded = true
+        service?.attachDisplaySurface(null)
     }
 
     // Forward touch events to the phone via JNI → InputService
@@ -139,10 +155,8 @@ class AaSdkScreenActivity : Activity(), SurfaceHolder.Callback {
         val localX = event.x - sv.left
         val localY = event.y - sv.top
 
-        // Scale to AA resolution (1920×1080, matches InputService/VideoService)
-        // from actual surface size -- was hardcoded to the stale 800x480
-        // resolution while the phone actually renders/expects 1920x1080,
-        // silently sending every touch to the wrong on-screen location.
+        // Scale to AA resolution (1920x1080, matches InputService/VideoService)
+        // from actual surface size.
         val aaX = localX * 1920f / surfaceWidth
         val aaY = localY * 1080f / surfaceHeight
 

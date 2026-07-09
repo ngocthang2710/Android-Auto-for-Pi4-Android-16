@@ -32,35 +32,40 @@ void VideoService::stop() {
 }
 
 namespace {
-// Real screen is 1920x1080; a phone connecting to this head unit was
-// observed requesting AVChannelSetupRequest.config_index=3 even though we
-// used to advertise (and locally decode at) only one 800x480 entry --
-// config_index=3 coincides with VideoResolution._1080p's own enum value,
-// and the phone appears to encode at whatever resolution it wants
-// regardless of what we say we support (MediaCodec/SurfaceFlinger silently
-// upscale to fill the Surface, hiding the mismatch visually). Advertise and
-// honor all four standard tiers so config_index (however the phone
-// interprets it: list position or resolution enum) always resolves to a
-// real, matching width/height -- critical for touch coordinates, which
-// have no equivalent auto-correction.
+// Real screen is 1920x1080. onAVChannelSetupRequest() below never actually
+// indexes this array by req.config_index() -- it always renders at
+// kDefaultConfigIndex regardless of what the phone asks for -- so the only
+// thing that matters about this list is what GearHead itself does with it.
+//
+// Confirmed live (phone-side logcat via wireless adb debugging, 2026-07-08):
+// GearHead's own window manager (CAR.WM) locks its *entire* window/touch
+// layout to list index 0 of this array -- "DisplayParams(selectedIndex=0,
+// codecWidth=800, codecHeight=480 ... dpi=92)" matched the old {800,480,92}
+// first entry exactly, and every Dashboard/GhFacetBar window it created
+// stayed confined to that ~800x480 canvas for the entire live session (not
+// just the startup loading screen). Meanwhile AVChannelSetupRequest.config_index
+// was 3 for the actual video codec negotiation -- a *different* GearHead
+// subsystem reading the *same* list with different semantics. With four
+// tiers, those two never agreed on a resolution, so every touch coordinate
+// (sent in the 1920x1080 space InputService/VideoService/AaSdkScreenActivity
+// all use) fell far outside GearHead's own ~800x480 window bounds --
+// "UpDown touch event (x,y) does not correspond to a window" for every
+// single touch, regardless of screen crashes or channel errors.
+//
+// Fix: collapse to the one resolution we actually ever render, at index 0,
+// so whichever subsystem reads "index 0" or "the tier we asked for" lands on
+// the same 1920x1080 GearHead uses for its own window layout and we use for
+// touch. dpi = diagonal_px / 10.1in (matches a common Pi touchscreen size).
 struct VideoConfigEntry { int width; int height; int dpi; proto::enums::VideoResolution::Enum resolution; };
-// dpi = diagonal_px / 10.1in, matching a common Pi touchscreen size, so
-// each entry stays internally consistent (dpi=140 was tuned for the old
-// 800x480 entry alone -- reusing it unchanged for 1920x1080 implied an
-// unrealistic ~15.7in screen, which can throw off any touch/UI scaling
-// GearHead derives from resolution+dpi together).
 // margin_height was tried here to reserve space for AAOS's
 // BottomCarSystemBar but the phone applied it as a TOP inset instead
 // (confirmed visually), so the bottom-bar overlap is now handled purely
 // on the HU side instead: AaSdkScreenActivity sizes its SurfaceView to
 // avoid the bar directly, no protocol-level margin needed.
 constexpr VideoConfigEntry kVideoConfigs[] = {
-    {800, 480, 92, proto::enums::VideoResolution::_480p},
-    {1280, 720, 145, proto::enums::VideoResolution::_720p},
-    {1600, 900, 182, proto::enums::VideoResolution::_1080p},
     {1920, 1080, 218, proto::enums::VideoResolution::_1080p},
 };
-constexpr size_t kDefaultConfigIndex = 3; // 1920x1080, matches this head unit's real screen
+constexpr size_t kDefaultConfigIndex = 0; // the only entry: 1920x1080, matches this head unit's real screen
 } // namespace
 
 void VideoService::fillFeatures(proto::messages::ServiceDiscoveryResponse& resp) {
@@ -103,26 +108,56 @@ void VideoService::onAVChannelSetupRequest(const proto::messages::AVChannelSetup
     const size_t idx = kDefaultConfigIndex;
     LOGI("setup request config_index=%u, using %dx%d", req.config_index(),
          kVideoConfigs[idx].width, kVideoConfigs[idx].height);
-    bool ok = output_->init(nullptr /*window set separately via nativeSetSurface*/,
-                             kVideoConfigs[idx].width, kVideoConfigs[idx].height);
+    // Do NOT call output_->init(nullptr, ...) here anymore. This used to be
+    // harmless under the old design, where the Activity's own Surface always
+    // arrived *after* this call (Activity/window creation lag reliably beat
+    // the phone's protocol round trip), so init(nullptr,...)'s effect (detach
+    // the window) was immediately overwritten moments later by the real
+    // nativeSetSurface call. Now the decoder's window is the persistent
+    // VideoBlitter input Surface, attached once via nativeSetSurface at
+    // Service startup -- long before any session/AVChannelSetupRequest even
+    // exists -- so this call would run *after* the real window is already
+    // attached and rip it back out, permanently zeroing AndroidVideoOutput's
+    // window_ (codec keeps decoding, but every releaseOutputBuffer's render
+    // flag is false forever -- confirmed live via write()/drainOutput()
+    // counters: outputBufferCount climbing steadily, render=0 on every call).
+    // Width/height are already fixed constants (kVideoConfigs) matching the
+    // VideoBlitter's persistent SurfaceTexture size, so there's nothing this
+    // call needs to (re)configure.
+    bool ok = true;
     proto::messages::AVChannelSetupResponse resp;
     resp.set_media_status(ok ? proto::enums::AVChannelSetupStatus::OK
                               : proto::enums::AVChannelSetupStatus::FAIL);
     resp.set_max_unacked(1);
-    resp.add_configs(req.config_index());
+    // openauto (our reference implementation) hardcodes config index 0 here
+    // regardless of what the phone requested, rather than echoing
+    // req.config_index() back -- aligning with that now since the phone
+    // stalling right after this response (never sending AVChannelStartIndication)
+    // is the open bug this session is chasing.
+    resp.add_configs(0);
     auto promise = channel::SendPromise::defer(strand_);
-    promise->then(std::bind(&VideoService::sendVideoFocusIndication, shared_from_this()),
+    promise->then(std::bind(&VideoService::sendVideoFocusIndication, shared_from_this(), true),
                   [](const error::Error& e) { LOGE("sendAVChannelSetupResponse error: %s", e.what()); });
     channel_->sendAVChannelSetupResponse(resp, std::move(promise));
     channel_->receive(shared_from_this());
 }
 
-void VideoService::sendVideoFocusIndication() {
+void VideoService::sendVideoFocusIndication(bool unrequested) {
+    // unrequested=true: this HU is proactively granting focus right after
+    // setup, without the phone having asked (VideoFocusRequest) first.
+    // unrequested=false: this is a direct reply to the phone's own request
+    // (see onVideoFocusRequest). The previous code always sent false, even
+    // for the proactive post-setup push -- mislabeling an unsolicited grant
+    // as "answering a request that was never made," which the phone may
+    // have silently ignored, explaining why it never followed up with
+    // AVChannelStartIndication.
+    LOGI("sending VideoFocusIndication(FOCUSED, unrequested=%d)", (int)unrequested);
     proto::messages::VideoFocusIndication ind;
     ind.set_focus_mode(proto::enums::VideoFocusMode::FOCUSED);
-    ind.set_unrequested(false);
+    ind.set_unrequested(unrequested);
     auto promise = channel::SendPromise::defer(strand_);
-    promise->then([]() {}, [](const error::Error& e) { LOGE("VideoFocusIndication error: %s", e.what()); });
+    promise->then([]() { LOGI("VideoFocusIndication sent OK"); },
+                  [](const error::Error& e) { LOGE("VideoFocusIndication error: %s", e.what()); });
     channel_->sendVideoFocusIndication(ind, std::move(promise));
 }
 
@@ -159,13 +194,19 @@ void VideoService::onAVMediaIndication(const common::DataConstBuffer& buf) {
     channel_->receive(shared_from_this());
 }
 
-void VideoService::onVideoFocusRequest(const proto::messages::VideoFocusRequest&) {
-    sendVideoFocusIndication();
+void VideoService::onVideoFocusRequest(const proto::messages::VideoFocusRequest& req) {
+    LOGI("video focus request mode=%d reason=%d", (int)req.focus_mode(), (int)req.focus_reason());
+    sendVideoFocusIndication(false);
     channel_->receive(shared_from_this());
 }
 
 void VideoService::onChannelError(const error::Error& e) {
+    // See AndroidAutoEntity::onChannelError for why this re-arm is required
+    // -- without it, a single transient receive error permanently stops new
+    // video frames from ever being processed again (session looks alive,
+    // screen just never updates again).
     LOGE("channel error: %s", e.what());
+    channel_->receive(shared_from_this());
 }
 
 } // namespace aasdk_android

@@ -31,7 +31,26 @@ AaSdkUsbSessionPtr createAndroidAutoSession(
     f1x::aasdk::usb::IUSBWrapper& usbWrapper,
     int fd);
 
+// Same session (SSL/messenger/services/entity), built over an already-connected
+// TCP socket fd instead of a USB accessory -- e.g. a socket accepted from a
+// wireless-projection TCP listener.
+// fd: a connected, native socket fd (e.g. from ParcelFileDescriptor.detachFd()
+//     on the Java side after accepting a connection).
+AaSdkUsbSessionPtr createAndroidAutoSessionTcp(
+    JNIEnv* env,
+    jobject serviceObj,
+    int fd);
+
 void sessionSetSurface(AaSdkUsbSession* session, ANativeWindow* window);
 void sessionSendTouchEvent(AaSdkUsbSession* session, int action, float x, float y);
+
+// Polled from Java (see AaSdkUsbService's fatal-error check loop) rather than
+// pushed via a native->Java callback: AndroidAutoEntity's watchdog fires on
+// one of this session's own io_service worker threads, and safely calling
+// back into Java from there would need a JavaVM attach/detach dance this
+// tree doesn't otherwise use anywhere. A plain atomic flag, read-and-cleared
+// from Java's own thread, avoids that entirely. Returns true at most once
+// per fatal event (exchange-and-clear).
+bool sessionCheckAndConsumeFatalError(AaSdkUsbSession* session);
 
 } // namespace aasdk_android

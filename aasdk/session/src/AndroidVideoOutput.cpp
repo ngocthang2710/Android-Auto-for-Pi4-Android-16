@@ -1,7 +1,9 @@
 #include <AndroidVideoOutput.hpp>
 #include <android/log.h>
 #include <media/NdkMediaFormat.h>
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #define LOG_TAG "AaSdk_Video"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -40,47 +42,107 @@ void AndroidVideoOutput::warmup() {
 }
 
 bool AndroidVideoOutput::init(ANativeWindow* window, int width, int height) {
+    std::lock_guard<std::mutex> lk(mutex_);
+
     if (window == nullptr) {
-        // No window yet -- e.g. AVChannelSetupRequest arrived before the
-        // Activity's Surface did. The codec gets created once a real window
-        // shows up via a later init() call from sessionSetSurface(); until
-        // then write() is a safe no-op (started_ stays false).
+        // No window yet (AVChannelSetupRequest arrived before the Activity's
+        // Surface did -- started_ is already false, so this is a no-op), or
+        // the surface was torn down while a codec was running (HU screen
+        // backgrounded/exited but the AA session stays alive in the
+        // background, unaware anything changed on the HU side).
+        //
+        // Deliberately do NOT stop() the codec here anymore: the phone never
+        // re-opens the video channel just because the HU's Activity/Surface
+        // was recreated (confirmed live -- AaSdk_VideoSvc's open/setup/start
+        // logs only once per session), so it keeps sending P-frames that
+        // reference earlier decoded pictures. Destroying the codec here would
+        // throw away that reference-frame state, and the next attach would
+        // have nothing but P-frames with no preceding IDR to decode against
+        // -- permanently black until a real channel reopen that never comes.
+        // Just detach the window; drainOutput() checks window_ before
+        // rendering, so decoding keeps running safely with output dropped.
+        if (window_) {
+            ANativeWindow_release(window_);
+            window_ = nullptr;
+        }
         return true;
     }
 
+    if (window_ == window) return true; // already attached to this exact window
+
     if (started_) {
-        if (window_ == window) return true; // already running against this window
-        stop(); // window changed (e.g. Surface recreated) -- tear down and recreate
+        // Live (re)attach on a running codec -- swap the output surface
+        // in place instead of stop()+recreate, for the same reason as the
+        // null-window branch above: recreating here would lose decode state
+        // the phone assumes is still there.
+        media_status_t st = AMediaCodec_setOutputSurface(codec_, window);
+        if (st == AMEDIA_OK) {
+            if (window_) ANativeWindow_release(window_);
+            window_ = window;
+            ANativeWindow_acquire(window_);
+            LOGI("Video surface (re)attached without codec restart");
+            return true;
+        }
+        LOGE("AMediaCodec_setOutputSurface failed: %d, falling back to full recreate", (int)st);
+        stopLocked();
     }
 
     window_ = window;
     ANativeWindow_acquire(window_);
 
-    codec_ = AMediaCodec_createDecoderByType("video/avc");
-    if (!codec_) {
-        LOGE("Failed to create AVC decoder");
-        return false;
+    // Configure retries with a short backoff instead of failing on the first
+    // error: when a session is force-reconnected (see AaSdkUsbService.
+    // resetWirelessSessionForReentry()), the *previous* session's codec on
+    // this exact same persistent window (VideoBlitter's input Surface --
+    // never swapped, see its own kdoc) may not have finished its async
+    // CCodec/HAL-side teardown yet. Confirmed live: AMediaCodec_delete()
+    // returning does not guarantee the window's nativeWindowDisconnect has
+    // actually completed, so a fast reconnect hits
+    // "nativeWindowConnect ... Invalid argument (-22)" -- a real Android
+    // platform race, not a logic bug here. Matches the retry-tolerant
+    // pattern this device's decoder already needs elsewhere (see warmup()).
+    constexpr int kMaxConfigureAttempts = 5;
+    constexpr auto kRetryDelay = std::chrono::milliseconds(150);
+    media_status_t status = AMEDIA_ERROR_UNKNOWN;
+    for (int attempt = 1; attempt <= kMaxConfigureAttempts; ++attempt) {
+        codec_ = AMediaCodec_createDecoderByType("video/avc");
+        if (!codec_) {
+            LOGE("Failed to create AVC decoder (attempt %d/%d)", attempt, kMaxConfigureAttempts);
+            std::this_thread::sleep_for(kRetryDelay);
+            continue;
+        }
+
+        AMediaFormat* fmt = AMediaFormat_new();
+        AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "video/avc");
+        AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, width);
+        AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, height);
+        // Low-latency mode: output frames as soon as decoded
+        AMediaFormat_setInt32(fmt, "low-latency", 1);
+
+        status = AMediaCodec_configure(codec_, fmt, window_, nullptr, 0);
+        AMediaFormat_delete(fmt);
+
+        if (status == AMEDIA_OK) break;
+
+        LOGE("AMediaCodec_configure failed: %d (attempt %d/%d), retrying",
+             (int)status, attempt, kMaxConfigureAttempts);
+        AMediaCodec_delete(codec_);
+        codec_ = nullptr;
+        std::this_thread::sleep_for(kRetryDelay);
     }
 
-    AMediaFormat* fmt = AMediaFormat_new();
-    AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "video/avc");
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, width);
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, height);
-    // Low-latency mode: output frames as soon as decoded
-    AMediaFormat_setInt32(fmt, "low-latency", 1);
-
-    media_status_t status = AMediaCodec_configure(
-        codec_, fmt, window_, nullptr, 0);
-    AMediaFormat_delete(fmt);
-
     if (status != AMEDIA_OK) {
-        LOGE("AMediaCodec_configure failed: %d", (int)status);
+        LOGE("AMediaCodec_configure failed after %d attempts: %d", kMaxConfigureAttempts, (int)status);
+        if (window_) { ANativeWindow_release(window_); window_ = nullptr; }
         return false;
     }
 
     status = AMediaCodec_start(codec_);
     if (status != AMEDIA_OK) {
         LOGE("AMediaCodec_start failed: %d", (int)status);
+        AMediaCodec_delete(codec_);
+        codec_ = nullptr;
+        if (window_) { ANativeWindow_release(window_); window_ = nullptr; }
         return false;
     }
 
@@ -90,7 +152,13 @@ bool AndroidVideoOutput::init(ANativeWindow* window, int width, int height) {
 }
 
 bool AndroidVideoOutput::write(const uint8_t* data, size_t size) {
+    std::lock_guard<std::mutex> lk(mutex_);
     if (!started_) return false;
+    writeCount_++;
+    if (writeCount_ <= 5 || writeCount_ % 100 == 0) {
+        LOGI("write: size=%zu writeCount=%lld outputBufferCount=%lld",
+             size, (long long)writeCount_, (long long)outputBufferCount_);
+    }
     drainOutput();
     return queueInput(data, size);
 }
@@ -124,11 +192,21 @@ void AndroidVideoOutput::drainOutput() {
     for (;;) {
         ssize_t idx = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
         if (idx < 0) break;
-        AMediaCodec_releaseOutputBuffer(codec_, (size_t)idx, true /*render*/);
+        // Only render if a window is currently attached -- when detached
+        // (init(nullptr,...) was called, screen backgrounded/exited) the
+        // codec keeps decoding in the background but output is dropped
+        // rather than pushed to an abandoned ANativeWindow, which is what
+        // previously produced a "queueBuffer failed" storm during teardown.
+        media_status_t st = AMediaCodec_releaseOutputBuffer(codec_, (size_t)idx, window_ != nullptr /*render*/);
+        outputBufferCount_++;
+        if (outputBufferCount_ <= 5 || outputBufferCount_ % 100 == 0 || st != AMEDIA_OK) {
+            LOGI("drainOutput: releaseOutputBuffer idx=%zd render=%d status=%d count=%lld",
+                 idx, (int)(window_ != nullptr), (int)st, (long long)outputBufferCount_);
+        }
     }
 }
 
-void AndroidVideoOutput::stop() {
+void AndroidVideoOutput::stopLocked() {
     if (started_) {
         AMediaCodec_stop(codec_);
         started_ = false;
@@ -141,6 +219,11 @@ void AndroidVideoOutput::stop() {
         ANativeWindow_release(window_);
         window_ = nullptr;
     }
+}
+
+void AndroidVideoOutput::stop() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    stopLocked();
 }
 
 } // namespace aasdk_android

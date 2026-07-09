@@ -2,5 +2,13 @@
 <permissions>
     <privapp-permissions package="com.android.car.aasdk">
         <permission name="android.car.permission.CAR_HANDLE_USB_AOAP_DEVICE"/>
+        <!-- signature|privileged permission: must be allowlisted here, not
+             granted via a default-permissions exception (that mechanism only
+             auto-grants "dangerous" runtime permissions). Read by
+             AaSdkBtWirelessHandshake to get the real WiFi SSID/BSSID. -->
+        <permission name="android.permission.NETWORK_SETTINGS"/>
+        <!-- signature|privileged: needed by AaSdkSoftApHotspot's
+             TetheringManager.startTethering/stopTethering calls. -->
+        <permission name="android.permission.TETHER_PRIVILEGED"/>
     </privapp-permissions>
 </permissions>

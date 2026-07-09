@@ -10,8 +10,11 @@
 #include <AndroidAudioOutput.hpp>
 #include <f1x/aasdk/USB/AOAPDevice.hpp>
 #include <f1x/aasdk/USB/USBWrapper.hpp>
+#include <f1x/aasdk/TCP/TCPEndpoint.hpp>
+#include <f1x/aasdk/TCP/TCPWrapper.hpp>
 #include <f1x/aasdk/Transport/SSLWrapper.hpp>
 #include <f1x/aasdk/Transport/USBTransport.hpp>
+#include <f1x/aasdk/Transport/TCPTransport.hpp>
 #include <f1x/aasdk/Messenger/Cryptor.hpp>
 #include <f1x/aasdk/Messenger/MessageInStream.hpp>
 #include <f1x/aasdk/Messenger/MessageOutStream.hpp>
@@ -19,6 +22,7 @@
 #include <boost/asio.hpp>
 #include <thread>
 #include <vector>
+#include <atomic>
 #include <android/log.h>
 
 #define LOG_TAG "AaSdk_Session"
@@ -37,6 +41,13 @@ struct AaSdkUsbSession {
     std::shared_ptr<AndroidVideoOutput> videoOut;
     std::shared_ptr<InputService> inputSvc;
     ANativeWindow* pendingWindow{nullptr};
+    // Set by AndroidAutoEntity's watchdog (via setFatalErrorCallback) on its
+    // own strand/worker thread; read-and-cleared by Java's poll thread
+    // through sessionCheckAndConsumeFatalError(). Safe without extra
+    // synchronization: this object outlives the callback (the destructor
+    // below joins all workers, including whichever one might be mid-callback,
+    // before the object itself goes away).
+    std::atomic<bool> fatalError{false};
 
     ~AaSdkUsbSession() {
         if (entity) { entity->stop(); entity.reset(); }
@@ -50,40 +61,10 @@ void destroyAndroidAutoSession(AaSdkUsbSession* session) {
     delete session;
 }
 
-AaSdkUsbSessionPtr createAndroidAutoSession(
-        JNIEnv* /*env*/,
-        jobject /*serviceObj*/,
-        libusb_context* usbCtx,
-        usb::IUSBWrapper& usbWrapper,
-        int fd) {
-
-    // Wrap the Android-opened fd as a libusb handle using the shared context
-    libusb_device_handle* rawHandle = nullptr;
-    int r = libusb_wrap_sys_device(usbCtx, static_cast<intptr_t>(fd), &rawHandle);
-    if (r != LIBUSB_SUCCESS || !rawHandle) {
-        LOGE("libusb_wrap_sys_device(%d) failed: %s", fd, libusb_error_name(r));
-        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
-    }
-
-    // DeviceHandle is shared_ptr<libusb_device_handle>
-    usb::DeviceHandle deviceHandle(rawHandle, [](libusb_device_handle* h) {
-        libusb_close(h);
-    });
-
-    AaSdkUsbSessionPtr session(new AaSdkUsbSession(), destroyAndroidAutoSession);
-
-    usb::IAOAPDevice::Pointer aoapDevice;
-    try {
-        aoapDevice = usb::AOAPDevice::create(usbWrapper, session->ioService,
-                                             std::move(deviceHandle));
-    } catch (const std::exception& ex) {
-        LOGE("AOAPDevice::create: %s", ex.what());
-        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
-    }
-
-    // Build the full transport + messenger + crypto stack
-    auto transport  = std::make_shared<transport::USBTransport>(session->ioService,
-                                                                std::move(aoapDevice));
+// Builds everything above the transport (SSL/crypto/messenger/services/entity)
+// and starts the session -- shared between the USB and TCP transports, which
+// differ only in how the transport itself is constructed.
+static void finishSessionSetup(AaSdkUsbSessionPtr& session, transport::ITransport::Pointer transport) {
     auto sslWrapper = std::make_shared<transport::SSLWrapper>();
     auto cryptor    = std::make_shared<messenger::Cryptor>(std::move(sslWrapper));
     cryptor->init();
@@ -123,6 +104,10 @@ AaSdkUsbSessionPtr createAndroidAutoSession(
         std::move(btSvc),
         std::move(avInputSvc));
 
+    session->entity->setFatalErrorCallback([s = session.get()]() {
+        s->fatalError.store(true, std::memory_order_relaxed);
+    });
+
     // 4 IO threads: prevents AAudio blocking in one channel from starving others
     for (int i = 0; i < 4; ++i) {
         session->workers.emplace_back([s = session.get()]() {
@@ -132,6 +117,67 @@ AaSdkUsbSessionPtr createAndroidAutoSession(
 
     session->entity->start();
     LOGI("AA session started");
+}
+
+AaSdkUsbSessionPtr createAndroidAutoSession(
+        JNIEnv* /*env*/,
+        jobject /*serviceObj*/,
+        libusb_context* usbCtx,
+        usb::IUSBWrapper& usbWrapper,
+        int fd) {
+
+    // Wrap the Android-opened fd as a libusb handle using the shared context
+    libusb_device_handle* rawHandle = nullptr;
+    int r = libusb_wrap_sys_device(usbCtx, static_cast<intptr_t>(fd), &rawHandle);
+    if (r != LIBUSB_SUCCESS || !rawHandle) {
+        LOGE("libusb_wrap_sys_device(%d) failed: %s", fd, libusb_error_name(r));
+        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
+    }
+
+    // DeviceHandle is shared_ptr<libusb_device_handle>
+    usb::DeviceHandle deviceHandle(rawHandle, [](libusb_device_handle* h) {
+        libusb_close(h);
+    });
+
+    AaSdkUsbSessionPtr session(new AaSdkUsbSession(), destroyAndroidAutoSession);
+
+    usb::IAOAPDevice::Pointer aoapDevice;
+    try {
+        aoapDevice = usb::AOAPDevice::create(usbWrapper, session->ioService,
+                                             std::move(deviceHandle));
+    } catch (const std::exception& ex) {
+        LOGE("AOAPDevice::create: %s", ex.what());
+        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
+    }
+
+    auto transport = std::make_shared<transport::USBTransport>(session->ioService,
+                                                                std::move(aoapDevice));
+    finishSessionSetup(session, std::move(transport));
+    return session;
+}
+
+AaSdkUsbSessionPtr createAndroidAutoSessionTcp(
+        JNIEnv* /*env*/,
+        jobject /*serviceObj*/,
+        int fd) {
+
+    AaSdkUsbSessionPtr session(new AaSdkUsbSession(), destroyAndroidAutoSession);
+
+    // Adopt the already-connected native socket fd (handed over from Java after
+    // accepting a TCP connection) into a boost::asio socket bound to this
+    // session's io_service.
+    auto socket = std::make_shared<boost::asio::ip::tcp::socket>(session->ioService);
+    boost::system::error_code ec;
+    socket->assign(boost::asio::ip::tcp::v4(), fd, ec);
+    if (ec) {
+        LOGE("tcp socket assign(fd=%d) failed: %s", fd, ec.message().c_str());
+        return AaSdkUsbSessionPtr(nullptr, destroyAndroidAutoSession);
+    }
+
+    static tcp::TCPWrapper tcpWrapper;
+    auto tcpEndpoint = std::make_shared<tcp::TCPEndpoint>(tcpWrapper, std::move(socket));
+    auto transport = std::make_shared<transport::TCPTransport>(session->ioService, std::move(tcpEndpoint));
+    finishSessionSetup(session, std::move(transport));
     return session;
 }
 
@@ -141,14 +187,16 @@ void sessionSetSurface(AaSdkUsbSession* session, ANativeWindow* window) {
         ANativeWindow_release(session->pendingWindow);
         session->pendingWindow = nullptr;
     }
-    if (session->videoOut && window) {
+    if (session->videoOut) {
         // Must match VideoService's kDefaultConfigIndex resolution and
-        // InputService's advertised touchscreen size (1920x1080).
+        // InputService's advertised touchscreen size (1920x1080). A null
+        // window (surface torn down) must reach here too, not just a real
+        // one -- see AndroidVideoOutput::init()'s stop() call for why.
         session->videoOut->init(window, 1920, 1080);
-    } else {
+    } else if (window) {
         // Store for when videoOut becomes available
         session->pendingWindow = window;
-        if (window) ANativeWindow_acquire(window);
+        ANativeWindow_acquire(window);
     }
 }
 
@@ -156,6 +204,11 @@ void sessionSendTouchEvent(AaSdkUsbSession* session, int action, float x, float 
     if (session && session->inputSvc) {
         session->inputSvc->injectTouchEvent(action, x, y);
     }
+}
+
+bool sessionCheckAndConsumeFatalError(AaSdkUsbSession* session) {
+    if (!session) return false;
+    return session->fatalError.exchange(false, std::memory_order_relaxed);
 }
 
 } // namespace aasdk_android

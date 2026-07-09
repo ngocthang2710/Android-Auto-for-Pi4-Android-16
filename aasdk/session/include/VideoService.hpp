@@ -34,7 +34,7 @@ public:
     void onChannelError(const f1x::aasdk::error::Error& e) override;
 
 private:
-    void sendVideoFocusIndication();
+    void sendVideoFocusIndication(bool unrequested);
 
     boost::asio::io_service::strand strand_;
     f1x::aasdk::channel::av::VideoServiceChannel::Pointer channel_;

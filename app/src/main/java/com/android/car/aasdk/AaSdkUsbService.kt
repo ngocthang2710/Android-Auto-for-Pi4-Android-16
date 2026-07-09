@@ -11,13 +11,29 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Binder
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.Surface
+import java.io.IOException
+import java.net.ServerSocket
+
+// Matches VideoService::kDefaultConfigIndex (see AndroidVideoOutput's callers) --
+// the decoder always configures at this resolution regardless of the phone/screen.
+private const val VIDEO_WIDTH = 1920
+private const val VIDEO_HEIGHT = 1080
 
 private const val TAG = "AaSdk_Svc"
 private const val NOTIF_ID = 1
 private const val CHANNEL_ID = "aasdk_channel"
+// Same TCP port real Android Auto Wireless projection connects to, so this
+// listener stays compatible with a future Bluetooth WiFi-handoff handshake.
+private const val WIFI_PROJECTION_PORT = 5288
+// Matches AndroidAutoEntity::kWatchdogIntervalMs -- no point polling faster
+// than the native watchdog itself can possibly flag a new fatal event.
+private const val FATAL_CHECK_INTERVAL_MS = 2000L
 
 class AaSdkUsbService : Service() {
 
@@ -34,8 +50,11 @@ class AaSdkUsbService : Service() {
     private external fun nativeDestroy(handle: Long)
     private external fun nativeOnAccessoryAttached(handle: Long, fd: Int)
     private external fun nativeOnAccessoryDetached(handle: Long)
+    private external fun nativeOnTcpAccepted(handle: Long, fd: Int)
     private external fun nativeSetSurface(handle: Long, surface: Surface?)
     private external fun nativeSendTouchEvent(handle: Long, action: Int, x: Float, y: Float)
+    private external fun nativeResetSession(handle: Long)
+    private external fun nativeCheckFatalError(handle: Long): Boolean
 
     inner class LocalBinder : Binder() {
         fun getService() = this@AaSdkUsbService
@@ -51,6 +70,34 @@ class AaSdkUsbService : Service() {
     private var usbConnection: android.hardware.usb.UsbDeviceConnection? = null
     private var attachedDevice: UsbDevice? = null
     private var detachListener: DetachListener? = null
+    private var wifiServerSocket: ServerSocket? = null
+    private var wifiAcceptThread: Thread? = null
+    private val softAp = AaSdkSoftApHotspot(this)
+    private val btWireless = AaSdkBtWirelessHandshake(softAp)
+
+    // Decodes into a permanent SurfaceTexture and blits each frame onto
+    // whatever on-screen Surface AaSdkScreenActivity currently provides --
+    // see VideoBlitter's kdoc for why the decoder's own output target must
+    // never change or be swapped on this device.
+    private var videoBlitter: VideoBlitter? = null
+
+    // Confirmed live 2026-07-08: a session can go transport-dead (repeated
+    // SSL_READ/WRITE errors, zero ping responses) with no USB detach
+    // broadcast at all -- nothing else notices, so the HU sits frozen on
+    // the last rendered frame until manually unplugged/replugged. The
+    // native watchdog (AndroidAutoEntity) now detects this and stops
+    // itself internally, but can't reach the UI on its own -- poll for
+    // that flag and treat it exactly like an accessory detach.
+    private val fatalCheckHandler = Handler(Looper.getMainLooper())
+    private val fatalCheckRunnable = object : Runnable {
+        override fun run() {
+            if (nativeHandle != 0L && nativeCheckFatalError(nativeHandle)) {
+                Log.e(TAG, "Native session reported fatal transport error, tearing down")
+                onAccessoryDetached()
+            }
+            fatalCheckHandler.postDelayed(this, FATAL_CHECK_INTERVAL_MS)
+        }
+    }
 
     fun setDetachListener(listener: DetachListener?) {
         detachListener = listener
@@ -71,7 +118,48 @@ class AaSdkUsbService : Service() {
         startForeground(NOTIF_ID, buildNotification())
         nativeHandle = nativeCreate()
         if (nativeHandle == 0L) Log.e(TAG, "nativeCreate failed")
+        val blitter = VideoBlitter(VIDEO_WIDTH, VIDEO_HEIGHT)
+        videoBlitter = blitter
+        if (nativeHandle != 0L) nativeSetSurface(nativeHandle, blitter.getInputSurface())
         registerReceiver(detachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
+        fatalCheckHandler.postDelayed(fatalCheckRunnable, FATAL_CHECK_INTERVAL_MS)
+        startWifiListener()
+        // Starting this does NOT turn on the AP by itself -- AaSdkBtWirelessHandshake
+        // only starts AaSdkSoftApHotspot once a phone actually BT-connects asking
+        // for wireless AA, so a plain wired-USB session never touches WiFi.
+        btWireless.start(WIFI_PROJECTION_PORT)
+    }
+
+    /** Called by AaSdkScreenActivity with its current Surface, or null when torn down. */
+    fun attachDisplaySurface(surface: Surface?) {
+        videoBlitter?.setOutputSurface(surface)
+    }
+
+    // Wireless (TCP) sessions have been observed going silent while the HU
+    // screen is backgrounded -- the socket stays connected but the phone
+    // never responds to anything again, leaving a permanently black screen
+    // on return with no local error. USB sessions don't need this: the
+    // phone doesn't reconnect just because our Activity was recreated (see
+    // AndroidVideoOutput::init()), and forcing a reset would mean a real
+    // USB AOAP replug, which this can't trigger anyway -- attachedDevice
+    // being null is exactly the signal that the current session is TCP.
+    //
+    // First attempt only closed the native TCP session (nativeResetSession)
+    // -- confirmed by log NOT to work: the phone's own AA app never
+    // reconnected afterwards (no further "TCP client connected" ever
+    // logged), because from the phone's side the BT link and WiFi AP both
+    // still looked fine, so it had no signal to redo discovery. Must tear
+    // down the BT+AP link too (btWireless.forceDisconnect(), which tears
+    // down the SoftAP via its own teardown path) -- that's what a full app
+    // process restart did by accident in earlier testing, and it was the
+    // one thing observed to reliably make the phone redo its full 5-stage
+    // handshake and reconnect.
+    fun resetWirelessSessionForReentry() {
+        if (nativeHandle != 0L && attachedDevice == null) {
+            Log.i(TAG, "Re-entering AA screen on a wireless session -- forcing reconnect")
+            nativeResetSession(nativeHandle)
+            btWireless.forceDisconnect()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -84,6 +172,9 @@ class AaSdkUsbService : Service() {
 
     override fun onDestroy() {
         unregisterReceiver(detachReceiver)
+        fatalCheckHandler.removeCallbacks(fatalCheckRunnable)
+        stopWifiListener()
+        btWireless.stop() // also tears down the AP if one is up (see its own stop())
         usbConnection?.close()
         usbConnection = null
         if (nativeHandle != 0L) {
@@ -93,16 +184,53 @@ class AaSdkUsbService : Service() {
         super.onDestroy()
     }
 
+    // Accepts wireless-projection TCP connections and hands each one to the
+    // same native session slot USB uses (createAndroidAutoSessionTcp). This is
+    // a secondary, optional path -- any failure here must stay contained to
+    // this thread and never take down the service (and with it the USB
+    // flow), so this catches Throwable rather than just IOException.
+    private fun startWifiListener() {
+        wifiAcceptThread = Thread {
+            try {
+                ServerSocket(WIFI_PROJECTION_PORT).use { server ->
+                    wifiServerSocket = server
+                    Log.i(TAG, "WiFi AA listener on port $WIFI_PROJECTION_PORT")
+                    while (!Thread.currentThread().isInterrupted) {
+                        val socket = server.accept()
+                        Log.i(TAG, "TCP client connected: ${socket.inetAddress}")
+                        val fd = ParcelFileDescriptor.fromSocket(socket).detachFd()
+                        socket.close()
+                        if (nativeHandle != 0L) {
+                            nativeOnTcpAccepted(nativeHandle, fd)
+                            startActivity(Intent(this, AaSdkScreenActivity::class.java).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            })
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "WiFi listener stopped: ${e.message}", e)
+            }
+        }.apply { isDaemon = true; start() }
+    }
+
+    private fun stopWifiListener() {
+        wifiAcceptThread?.interrupt()
+        try {
+            wifiServerSocket?.close()
+        } catch (e: IOException) {
+            // already closed
+        }
+        wifiServerSocket = null
+        wifiAcceptThread = null
+    }
+
     private fun onAccessoryDetached() {
         if (nativeHandle != 0L) nativeOnAccessoryDetached(nativeHandle)
         usbConnection?.close()
         usbConnection = null
         attachedDevice = null
         detachListener?.onAccessoryDetached()
-    }
-
-    fun setSurface(surface: Surface?) {
-        if (nativeHandle != 0L) nativeSetSurface(nativeHandle, surface)
     }
 
     fun sendTouchEvent(action: Int, x: Float, y: Float) {
