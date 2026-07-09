@@ -287,6 +287,47 @@ real hardware against a real phone:
    instead to `VideoFocusIndication.unrequested` and the
    `AVChannelSetupResponse` config-index mismatch, both fixed together in
    the next build, which is the one confirmed working end-to-end.
+8. **Wireless session goes silent when the HU screen is backgrounded and
+   re-entered**: socket stays `ESTABLISHED` but the phone stops responding
+   to anything, including pings, leaving a black screen with no local
+   error signal. Three layered fixes were needed, each confirmed necessary
+   against a real phone: (a) `AaSdkScreenActivity` now force-closes the
+   native session (`nativeResetSession`) on a genuine re-entry, scoped to
+   wireless only (`attachedDevice == null`) so USB sessions are untouched;
+   (b) closing only the TCP session wasn't enough -- the phone's own AA app
+   never redid discovery because its BT link and WiFi AP both still looked
+   fine, so `AaSdkBtWirelessHandshake.forceDisconnect()` now tears down the
+   BT link and SoftAP together, the one thing observed to reliably make the
+   phone redo its full 5-stage handshake; (c) the resulting fast reconnect
+   exposed `AMediaCodec_configure()` failing with `nativeWindowConnect ...
+   Invalid argument (-22)` because the previous session's codec teardown
+   (bound to the same persistent `VideoBlitter` input surface) hadn't
+   finished asynchronously yet -- `AndroidVideoOutput::init()` now retries
+   configure with a short backoff (up to 5 attempts, 150ms apart).
+9. **Touch never registered on the phone, 93/93 misses** -- not a protocol
+   bug: GearHead's own window manager (CAR.WM) locks its touch window to
+   `video_configs[0]`, confirmed live via phone-side logcat
+   (`selectedIndex=0, codecWidth=800, codecHeight=480`, an old low-res
+   tier), while `VideoService`/`AaSdkScreenActivity` render at 1920x1080 --
+   every touch landed outside GearHead's actual window bounds regardless of
+   what coordinates were sent. `VideoService::onAVChannelSetupRequest`
+   also never indexed `video_configs` by the phone's requested
+   `config_index` and always echoed back index 0. Fixed by collapsing the
+   advertised config list to the one resolution actually rendered, at
+   index 0. Confirmed on hardware: touch-miss errors dropped from 93/93 to
+   0. Not wireless-specific -- this is the shared `VideoService`/native
+   session layer, so it fixes touch for wired sessions too.
+10. **Head unit freezes on the last rendered frame forever if the
+    transport dies without a clean signal** -- observed with a wireless
+    session going transport-dead (repeated `SSL_READ`/`SSL_WRITE` channel
+    errors, zero ping responses for 58+s) but no USB detach broadcast to
+    react to (there being no USB involved). `AndroidAutoEntity` now runs a
+    watchdog alongside `Pinger`: after ~4 missed 2s ping intervals (8s) the
+    transport is considered fatally dead and the session stops itself.
+    Polled from Java every 2s via `nativeCheckFatalError`; when set,
+    `AaSdkUsbService` tears down the session exactly like a real accessory
+    detach. Also shared with the wired path, which can hit the same silent
+    SSL-error failure mode.
 
 ## Known quirks (not bugs)
 
@@ -314,7 +355,14 @@ Beyond what wired-only `AaSdkUsbBridge` already had:
 
 ## Apply
 
-Same procedure as the `main` branch's
-[README](https://github.com/ngocthang2710/Android-Auto-for-Pi4-Android-16/blob/main/README.md#building)
--- this feature's files are part of the same `aasdk/`, `app/`, and
-`device-patches/` full-copy directories, no separate steps needed.
+Same procedure as [README.md's Building section](../README.md#building) --
+this feature's files are part of the same `aasdk/`, `app/`, and
+`device-patches/` full-copy directories -- plus one extra patch this
+feature needs on top:
+
+```
+cd <AOSP_ROOT>/frameworks/base
+git apply <THIS_REPO>/platform-patches/MobileConnectionRepositoryImpl.kt.patch
+```
+
+See [systemui-bluetooth-crash-fix.md](systemui-bluetooth-crash-fix.md) for why.

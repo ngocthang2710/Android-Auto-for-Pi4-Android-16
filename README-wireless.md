@@ -1,8 +1,7 @@
 # Wireless (WiFi) Android Auto for the RPi4 head unit
 
-Adds a **wireless** projection path on top of the wired head unit that lives
-on this repo's [`main` branch](https://github.com/ngocthang2710/Android-Auto-for-Pi4-Android-16/blob/main/README.md)
--- read that first. Once a phone has
+Adds a **wireless** projection path on top of the wired head unit documented
+in [README.md](README.md) -- read that first. Once a phone has
 been Bluetooth-paired with the device (e.g. from a prior wired session, or
 plain OS-level BT pairing), it can launch Android Auto over WiFi with no
 cable, by connecting to a WiFi access point **hosted by the Pi4 itself**
@@ -22,10 +21,14 @@ on the car screen.
 
 **Working:** BT RFCOMM handshake -> self-hosted WiFi AP -> TCP session ->
 SSL handshake -> service discovery -> video/audio/sensor channels, all the
-way to a rendered Android Auto screen -- the same rendering path and known
-issues (black screen on first boot, no touch reaction) as the wired README
-apply here too, since it's the same native session/video/input stack
-underneath.
+way to a rendered Android Auto screen -- the same rendering path as the
+wired README, since it's the same native session/video/input stack
+underneath, including its remaining known issue (black screen on the very
+first boot) and its fixes (touch input, transport-dead recovery -- see
+[README.md](README.md#status)). On top of that, wireless-specific
+robustness: re-entering the HU screen after backgrounding now reliably
+forces a fresh BT/AP/TCP session instead of leaving a silently dead one
+(see the debugging log).
 
 **Known quirks (not currently blocking):**
 - Stage 5/5 of the BT handshake (`WifiConnectStatus`) frequently times out
@@ -68,6 +71,18 @@ video on real hardware: **[docs/wireless-android-auto.md](docs/wireless-android-
   reentered without losing decode state. Not wireless-specific, but part of
   the same change set and needed either way for the screen to stay usable
   across a reconnect.
+- **Forced session reset on screen re-entry** -- backgrounding the HU
+  screen during a wireless session could leave it silently dead (socket
+  `ESTABLISHED`, phone never responds again). `AaSdkScreenActivity` now
+  force-closes and `AaSdkBtWirelessHandshake.forceDisconnect()` tears down
+  the BT link and SoftAP together on a genuine re-entry (wireless only --
+  USB sessions are untouched), which is what actually gets the phone to
+  redo its handshake. See the debugging log for why each of the three
+  layered fixes here was needed.
+- **A native transport-watchdog** (`AndroidAutoEntity`, shared with the
+  wired path) that stops a session that's gone fatally silent -- repeated
+  SSL errors, no ping response for ~8s -- instead of freezing on the last
+  frame forever with no detach signal to react to.
 
 ## Requirements
 
@@ -79,13 +94,15 @@ video on real hardware: **[docs/wireless-android-auto.md](docs/wireless-android-
 
 ## Repo layout additions
 
-Same [full-copy directories](https://github.com/ngocthang2710/Android-Auto-for-Pi4-Android-16/blob/main/README.md#repo-layout)
+Same [full-copy directories](README.md#repo-layout)
 as the wired base (`aasdk/`, `app/`) -- this feature's files live inside
-those, no new top-level directories. One extra file under `device-patches/`:
+those, no new top-level directories. Two extra files, one under
+`device-patches/` and one under `platform-patches/`:
 
 | In this repo | Applies to / installs at |
 |---|---|
 | `device-patches/permissions/default-permissions-com.android.car.aasdk.xml` | `device/brcm/rpi4/permissions/default-permissions-com.android.car.aasdk.xml` (new file) -- grants `BLUETOOTH_ADVERTISE`, needed to register the RFCOMM SDP record |
+| `platform-patches/MobileConnectionRepositoryImpl.kt.patch` | `git apply` inside `frameworks/base/`, patches `packages/SystemUI/.../MobileConnectionRepositoryImpl.kt` -- without it, SystemUI crashes as soon as the phone's BT-HFP connection registers a telephony subscription on this modem-less build. See [docs/systemui-bluetooth-crash-fix.md](docs/systemui-bluetooth-crash-fix.md) |
 
 Permissions added beyond the wired base (`NETWORK_SETTINGS`/`TETHER_PRIVILEGED`
 for the SoftAP, `BLUETOOTH_ADVERTISE` for the RFCOMM SDP record, plain WiFi/
@@ -94,10 +111,15 @@ INTERNET access) are broken down in
 
 ## Building
 
-No separate build steps -- this feature's files are part of the same
-`aasdk/`, `app/`, and `device-patches/` copies described in the `main`
-branch's [README.md Building section](https://github.com/ngocthang2710/Android-Auto-for-Pi4-Android-16/blob/main/README.md#building).
-Follow that procedure; there is nothing wireless-specific to do differently.
+This feature's files are part of the same `aasdk/`, `app/`, and
+`device-patches/` copies described in [README.md's Building
+section](README.md#building) -- follow that procedure, plus one extra
+patch this feature needs that the wired base doesn't:
+
+```
+cd <AOSP_ROOT>/frameworks/base
+git apply <THIS_REPO>/platform-patches/MobileConnectionRepositoryImpl.kt.patch
+```
 
 ## License
 
