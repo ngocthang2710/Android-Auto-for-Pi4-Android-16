@@ -50,6 +50,10 @@ class AaSdkScreenActivity : Activity(), SurfaceHolder.Callback {
             service = (binder as AaSdkUsbService.LocalBinder).getService()
             surfaceView?.holder?.surface?.let { service?.attachDisplaySurface(it) }
             service?.setDetachListener { goHomeAndFinish() }
+            // The user (or the car launcher's Dock) is opening the app screen
+            // again -- a prior Cancel/timeout no longer applies. See
+            // AaSdkUsbService.userDeclinedWireless's own doc.
+            service?.clearWirelessDecline()
         }
         override fun onServiceDisconnected(name: ComponentName?) { service = null }
     }

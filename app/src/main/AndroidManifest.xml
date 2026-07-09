@@ -27,6 +27,31 @@
          it (skipping its multi-app disambiguation dialog) instead of just a
          generic usb-device handler. See AaSdkAoapService/device_filter.xml. -->
     <uses-permission android:name="android.car.permission.CAR_HANDLE_USB_AOAP_DEVICE" />
+    <!-- Lets AaSdkUsbService.requestWirelessStartConfirmation() call
+         startActivity(AaSdkWirelessConfirmActivity) directly from the
+         background service. Without this, Android's background-activity-
+         launch policy silently blocks that call whenever nothing from this
+         app is currently visible (confirmed live 2026-07-09: "Background
+         activity launch blocked!...result code=102"). A prior fix routed
+         around this via a full-screen-intent notification instead, but that
+         depends on POST_NOTIFICATIONS (a runtime permission whose
+         default-permissions pre-grant only applies at initial user
+         creation, not on every incremental flash) AND on the app's overall
+         notification importance not being blocked at the NotificationManager
+         level (confirmed live 2026-07-09: every post was silently dropped,
+         numBlocked=20/numPosted=0, even after POST_NOTIFICATIONS was
+         granted), two failure points outside this app's own control, for
+         UI that AAOS doesn't reliably surface as full-screen anyway. This
+         signature|privileged permission is the direct, Android-blessed way
+         for a privileged app to start activities from the background with
+         no such dependencies; see com.android.car.aasdk.xml for the
+         matching privapp-permissions allowlist entry it requires on top of
+         this declaration. -->
+    <uses-permission android:name="android.permission.START_ACTIVITIES_FROM_BACKGROUND" />
+    <!-- Lets AaSdkBootReceiver start AaSdkUsbService right at boot, so a
+         BT-only connect shows the wireless confirm dialog even if nothing
+         has opened this app yet this boot (see that receiver's comment). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:label="Android Auto HU"
@@ -82,5 +107,16 @@
             android:name=".AaSdkAoapService"
             android:exported="true"
             android:permission="android.permission.MANAGE_USB" />
+
+        <!-- Starts AaSdkUsbService at boot so its RFCOMM listener exists
+             before the user does anything, see AaSdkBootReceiver's own
+             comment. -->
+        <receiver
+            android:name=".AaSdkBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

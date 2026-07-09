@@ -4,9 +4,17 @@
     BLUETOOTH_ADVERTISE is a dangerous/runtime permission (unlike
     NETWORK_SETTINGS, which is signature|privileged and belongs in
     packages/apps/AaSdkUsbBridge/com.android.car.aasdk.xml's privapp-permissions
-    allowlist instead) -- AaSdkBtWirelessHandshake's
+    allowlist instead); AaSdkBtWirelessHandshake's
     listenUsingRfcommWithServiceRecord() registers an SDP record, which needs
     it on top of BLUETOOTH_CONNECT.
+
+    (POST_NOTIFICATIONS used to be pre-granted here for the wireless-confirm
+    full-screen-intent notification, but that whole approach was dropped
+    2026-07-09 in favor of AaSdkUsbService calling startActivity() directly
+    via the signature|privileged START_ACTIVITIES_FROM_BACKGROUND permission,
+    see AndroidManifest.xml's comment. This exceptions mechanism only
+    auto-applies at initial user creation anyway, which is exactly the kind
+    of dependency that approach was removed to avoid.)
 -->
 <exceptions>
     <exception package="com.android.car.aasdk">

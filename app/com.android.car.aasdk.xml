@@ -10,5 +10,11 @@
         <!-- signature|privileged: needed by AaSdkSoftApHotspot's
              TetheringManager.startTethering/stopTethering calls. -->
         <permission name="android.permission.TETHER_PRIVILEGED"/>
+        <!-- signature|privileged: lets AaSdkUsbService.requestWirelessStartConfirmation()
+             call startActivity() directly from the background service,
+             bypassing background-activity-launch restrictions without the
+             notification-based workaround this replaced (see
+             AndroidManifest.xml's own comment for why that was dropped). -->
+        <permission name="android.permission.START_ACTIVITIES_FROM_BACKGROUND"/>
     </privapp-permissions>
 </permissions>

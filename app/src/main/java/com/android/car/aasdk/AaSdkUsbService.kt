@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -39,7 +40,7 @@ private const val FATAL_CHECK_INTERVAL_MS = 2000L
 // How long AaSdkWirelessConfirmActivity waits for a Start/Cancel tap before
 // auto-declining. Shared (not private) so the Activity can drive the same
 // on-screen countdown instead of guessing a duration independently.
-const val WIRELESS_CONFIRM_TIMEOUT_MS = 18000L
+const val WIRELESS_CONFIRM_TIMEOUT_MS = 8000L
 
 class AaSdkUsbService : Service() {
 
@@ -82,6 +83,45 @@ class AaSdkUsbService : Service() {
     private var attachedDevice: UsbDevice? = null
     private var detachListener: DetachListener? = null
     private var confirmDismissListener: ConfirmDismissListener? = null
+
+    // Confirmed live 2026-07-09: the car launcher's own Dock feature can
+    // silently relaunch AaSdkScreenActivity on its own (DockViewModel
+    // restoring a recently-used app), completely independent of the user
+    // actually tapping the AA icon or of any wireless session actually being
+    // alive. requestWirelessStartConfirmation() used to auto-approve based on
+    // detachListener != null (i.e. "is *some* AaSdkScreenActivity instance
+    // currently bound"), which made a Dock-triggered resurrection of the
+    // screen silently swallow the next wireless confirm prompt even though
+    // the previous engagement had already fully ended (onAccessoryDetached()
+    // already ran). The real question isn't "is the UI alive" -- it's "is
+    // the wireless engagement itself still live" -- so track that directly
+    // instead of inferring it from Activity lifecycle. Only cleared where an
+    // engagement genuinely ends (onAccessoryDetached()); NOT touched by
+    // resetWirelessSessionForReentry()'s forced disconnect-then-reconnect,
+    // so bug #1's original fix (don't reprompt for a same-engagement
+    // re-entry) still holds.
+    @Volatile private var wirelessEngagementApproved = false
+
+    // Confirmed live 2026-07-09: declining (Cancel button or 18s timeout)
+    // closes this BT link (handleConnection()'s finally block), and the
+    // phone reconnects to the RFCOMM socket almost immediately (single-
+    // digit ms gap observed in logcat) -- with nothing to remember "just
+    // declined", that reconnection went straight back through
+    // requestWirelessStartConfirmation() and re-showed the dialog right on
+    // top of wherever Cancel had just navigated to, making it look like
+    // Cancel does nothing but bounce back to the same prompt.
+    //
+    // Scope of "declined" is this BT connection, not forever: stay declined
+    // -- silently, no more prompts -- for as long as the phone's classic BT
+    // link (ACL) stays up, since every RFCOMM reconnect attempt in that
+    // window is the same phone auto-retrying the same declined ask, not a
+    // new one. Reset back to false (so the *next* BT connect prompts again,
+    // per the actual requirement) when: the phone's ACL disconnects
+    // (aclDisconnectReceiver, a real "this is a new connection" signal), the
+    // user opens the app themselves (AaSdkScreenActivity's
+    // onServiceConnected calls clearWirelessDecline()), or a real engagement
+    // actually ends (onAccessoryDetached()).
+    @Volatile private var userDeclinedWireless = false
     private var wifiServerSocket: ServerSocket? = null
     private var wifiAcceptThread: Thread? = null
     private val softAp = AaSdkSoftApHotspot(this)
@@ -126,6 +166,14 @@ class AaSdkUsbService : Service() {
         confirmDismissListener = listener
     }
 
+    // Called from AaSdkScreenActivity's onServiceConnected -- i.e. whenever
+    // the user (or the car launcher's Dock) opens the app screen. A prior
+    // decline no longer means anything once the user is actively engaging
+    // with the app again; see userDeclinedWireless's own comment.
+    fun clearWirelessDecline() {
+        userDeclinedWireless = false
+    }
+
     // Called from AaSdkBtWirelessHandshake's own BT accept thread (never the
     // main thread) -- blocks that thread until the user answers the
     // on-screen prompt, the timeout elapses, or connectDevice() preempts it
@@ -136,30 +184,64 @@ class AaSdkUsbService : Service() {
             Log.i(TAG, "USB already attached, declining wireless AA without prompting")
             return false
         }
+        if (userDeclinedWireless) {
+            Log.i(TAG, "User already declined wireless AA, declining again without prompting")
+            return false
+        }
         // Confirmed live 2026-07-09: without this check, ANY BT reconnect of
         // an already-approved session (e.g. resetWirelessSessionForReentry()'s
         // own forceDisconnect-then-reconnect when the AA screen is simply
-        // re-entered) re-triggered this whole prompt. The dialog then covered
-        // AaSdkScreenActivity, which made IT look backgrounded, which on
-        // resume called resetWirelessSessionForReentry() again -- an infinite
+        // re-entered) re-triggered this whole prompt -- an infinite
         // reconnect/reprompt loop (AP flapping every few seconds, "socket
         // closed" handshake failures) confirmed via logcat + activity-stack
-        // dump. detachListener is non-null for as long as AaSdkScreenActivity
-        // is alive (set in its onServiceConnected, cleared in its onDestroy),
-        // regardless of foreground/background -- a reliable "this is a
-        // reconnect within an existing engagement, not a new ask" signal.
-        if (detachListener != null) {
-            Log.i(TAG, "AA screen already active, auto-approving wireless reconnect")
+        // dump. This used to key off detachListener != null (i.e. "is some
+        // AaSdkScreenActivity instance currently bound"), but that signal
+        // turned out to be unreliable: the car launcher's own Dock can
+        // silently relaunch AaSdkScreenActivity on its own (confirmed via
+        // DockViewModel logs) with no session live and no user tap at all --
+        // which made this auto-approve fire and swallow the very next
+        // legitimate prompt, even though the prior engagement had already
+        // fully ended. wirelessEngagementApproved tracks the engagement
+        // itself (set true only once this function actually returns true,
+        // cleared only in onAccessoryDetached() where an engagement
+        // genuinely ends) instead of UI liveness.
+        if (wirelessEngagementApproved) {
+            Log.i(TAG, "Wireless engagement already approved and still live, auto-approving reconnect")
             return true
         }
         val latch = CountDownLatch(1)
         pendingConfirmResult = false
         pendingConfirmLatch = latch
+
+        // Confirmed live 2026-07-09: a plain startActivity() from here used
+        // to be silently blocked by Android's background-activity-launch
+        // policy whenever this app had no already-visible Activity (e.g.
+        // right after unplugging USB) -- logcat showed "Background activity
+        // launch blocked!...callingUidHasVisibleActivity: false...result
+        // code=102". A full-screen-intent notification was tried as a
+        // workaround, but that turned out to depend on two things outside
+        // this app's control: POST_NOTIFICATIONS's default-permissions
+        // pre-grant only applies at initial user creation (not on later
+        // flashes), and even once granted, every post was still silently
+        // dropped by NotificationManagerService with the app's overall
+        // notification importance blocked (confirmed via `dumpsys
+        // notification`: numPostedByApp=0, numBlocked=20). The
+        // START_ACTIVITIES_FROM_BACKGROUND permission (privapp-allowlisted,
+        // see AndroidManifest.xml/com.android.car.aasdk.xml) is the direct,
+        // Android-blessed way for a privileged app to start activities from
+        // the background -- no notification machinery, no runtime-grant
+        // timing dependency.
         startActivity(Intent(this, AaSdkWirelessConfirmActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         })
+
         latch.await(timeoutMs, TimeUnit.MILLISECONDS)
         pendingConfirmLatch = null
+        if (pendingConfirmResult) {
+            wirelessEngagementApproved = true
+        } else {
+            userDeclinedWireless = true
+        }
         return pendingConfirmResult
     }
 
@@ -187,6 +269,18 @@ class AaSdkUsbService : Service() {
         }
     }
 
+    // The real "this is a new BT connection, not the same phone retrying
+    // its declined ask" signal for userDeclinedWireless -- see that field's
+    // own doc. Not filtered by device address: this app only ever expects
+    // one phone connected at a time, so any classic-BT ACL disconnect is
+    // reason enough to let the next RFCOMM attempt prompt again.
+    private val aclDisconnectReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            Log.i(TAG, "BT ACL disconnected, clearing any prior wireless decline")
+            userDeclinedWireless = false
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -197,6 +291,7 @@ class AaSdkUsbService : Service() {
         videoBlitter = blitter
         if (nativeHandle != 0L) nativeSetSurface(nativeHandle, blitter.getInputSurface())
         registerReceiver(detachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
+        registerReceiver(aclDisconnectReceiver, IntentFilter(BluetoothDevice.ACTION_ACL_DISCONNECTED))
         fatalCheckHandler.postDelayed(fatalCheckRunnable, FATAL_CHECK_INTERVAL_MS)
         startWifiListener()
         // Starting this does NOT turn on the AP by itself -- AaSdkBtWirelessHandshake
@@ -247,6 +342,7 @@ class AaSdkUsbService : Service() {
 
     override fun onDestroy() {
         unregisterReceiver(detachReceiver)
+        unregisterReceiver(aclDisconnectReceiver)
         fatalCheckHandler.removeCallbacks(fatalCheckRunnable)
         stopWifiListener()
         btWireless.stop() // also tears down the AP if one is up (see its own stop())
@@ -305,6 +401,15 @@ class AaSdkUsbService : Service() {
         usbConnection?.close()
         usbConnection = null
         attachedDevice = null
+        // The engagement (USB or wireless) has genuinely ended here -- the
+        // next BT client to connect must go through a fresh confirm, no
+        // matter what the UI happens to be doing (see wirelessEngagementApproved's
+        // own doc for why UI liveness alone isn't a safe signal for this).
+        // A stale decline shouldn't outlive the engagement it was declined
+        // for either -- a USB session ending (say) is as good a fresh start
+        // as the user reopening the app.
+        wirelessEngagementApproved = false
+        userDeclinedWireless = false
         detachListener?.onAccessoryDetached()
     }
 
@@ -356,8 +461,9 @@ class AaSdkUsbService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val ch = NotificationChannel(CHANNEL_ID, "Android Auto HU", NotificationManager.IMPORTANCE_LOW)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "Android Auto HU", NotificationManager.IMPORTANCE_LOW))
     }
 
     private fun buildNotification(): Notification =

@@ -17,6 +17,12 @@ private const val TAG = "AaSdk_BtWireless"
 // aa-proxy-rs, headunit-revived).
 private val AA_WIRELESS_UUID: UUID = UUID.fromString("4de17a00-52cb-11e6-bdf4-0800200c9a66")
 
+// Pause before re-opening the RFCOMM server socket after an unexpected
+// accept()/listen() failure -- long enough not to busy-loop-spam logcat if
+// the BT adapter is off for a while, short enough that a transient blip
+// (e.g. an adapter toggle) re-arms well within a user's next reconnect.
+private const val RFCOMM_RELISTEN_DELAY_MS = 2000L
+
 // f1x/aa-proxy-rs "ProxyMessageId" values -- kept in full (even the ones this
 // class doesn't send) so logged msgId numbers are self-documenting.
 private const val MSG_WIFI_START_REQUEST = 1
@@ -70,25 +76,52 @@ class AaSdkBtWirelessHandshake(
             Log.e(TAG, "No BluetoothAdapter, wireless handshake disabled")
             return
         }
-        // This whole feature is optional/experimental on top of the working USB
-        // flow -- e.g. a missing BLUETOOTH_ADVERTISE grant throws
-        // SecurityException, not IOException. Catching Throwable here keeps any
-        // failure contained to this thread instead of crashing the process
-        // (and with it, the USB session running in the same service).
+        // Confirmed live 2026-07-09: server.accept() throws (e.g. the BT
+        // adapter cycling underneath this socket) whenever the phone's own
+        // reconnect happens to race a BT state change on the HU side. The
+        // catch used to sit outside this while loop, so that single throw
+        // permanently ended this daemon thread -- nothing re-armed it, so
+        // every wireless-AA attempt afterwards silently died before ever
+        // reaching confirmStart() (no dialog, no log, nothing). Same failure
+        // class as the channel-receive-never-rearmed bug: a background
+        // listener must survive its own transient failures, not just log
+        // and disappear. The retry now lives *inside* the outer loop so a
+        // fresh BluetoothServerSocket is opened and listening again instead
+        // of leaving the service silently deaf until its process restarts.
         acceptThread = Thread {
-            try {
-                val server = adapter.listenUsingRfcommWithServiceRecord(
-                    "AndroidAutoWirelessHU", AA_WIRELESS_UUID)
-                serverSocket = server
-                Log.i(TAG, "RFCOMM listening on $AA_WIRELESS_UUID")
-                while (!Thread.currentThread().isInterrupted) {
-                    val socket = server.accept()
-                    Log.i(TAG, "BT client connected: ${socket.remoteDevice?.address}")
-                    handleConnection(socket, tcpPort)
+            while (!Thread.currentThread().isInterrupted) {
+                // This whole feature is optional/experimental on top of the
+                // working USB flow -- e.g. a missing BLUETOOTH_ADVERTISE
+                // grant throws SecurityException, not IOException. Catching
+                // Throwable here keeps any failure contained to this thread
+                // instead of crashing the process (and with it, the USB
+                // session running in the same service).
+                try {
+                    val server = adapter.listenUsingRfcommWithServiceRecord(
+                        "AndroidAutoWirelessHU", AA_WIRELESS_UUID)
+                    serverSocket = server
+                    Log.i(TAG, "RFCOMM listening on $AA_WIRELESS_UUID")
+                    while (!Thread.currentThread().isInterrupted) {
+                        val socket = server.accept()
+                        Log.i(TAG, "BT client connected: ${socket.remoteDevice?.address}")
+                        handleConnection(socket, tcpPort)
+                    }
+                } catch (e: Throwable) {
+                    if (Thread.currentThread().isInterrupted) {
+                        // stop() closing serverSocket is what actually breaks
+                        // the blocking accept() call -- this is the expected,
+                        // intentional shutdown path, not a failure to retry.
+                        break
+                    }
+                    Log.e(TAG, "RFCOMM listener failed, re-arming: ${e.message}", e)
+                    try {
+                        Thread.sleep(RFCOMM_RELISTEN_DELAY_MS)
+                    } catch (ie: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
                 }
-            } catch (e: Throwable) {
-                Log.e(TAG, "RFCOMM listener stopped: ${e.message}", e)
             }
+            Log.i(TAG, "RFCOMM listener thread exiting")
         }.apply { isDaemon = true; start() }
     }
 
