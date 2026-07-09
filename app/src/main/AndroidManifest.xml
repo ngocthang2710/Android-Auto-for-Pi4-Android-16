@@ -60,6 +60,14 @@
             </intent-filter>
         </activity>
 
+        <!-- "Start Android Auto (Wireless)?" prompt, shown by AaSdkUsbService
+             when a phone connects over BT with no USB device attached. -->
+        <activity
+            android:name=".AaSdkWirelessConfirmActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen" />
+
         <!-- Background service that holds the C++ session -->
         <service
             android:name=".AaSdkUsbService"

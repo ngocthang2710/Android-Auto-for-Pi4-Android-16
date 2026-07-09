@@ -43,8 +43,17 @@ private const val AP_TYPE_STATIC = 0
  * Credentials sent to the phone (SSID/passphrase/BSSID) are for the AP this
  * head unit itself hosts and broadcasts (see [AaSdkSoftApHotspot]), not an
  * external/shared network -- the phone joins the head unit directly.
+ *
+ * [confirmStart] gates whether a BT connection actually gets an AP: it's
+ * expected to show the user a Start/Cancel prompt (or decline immediately if
+ * USB is already attached) and block the calling thread -- this handshake
+ * runs entirely on its own dedicated accept thread, so blocking here is fine
+ * and matches this class's existing blocking-I/O style.
  */
-class AaSdkBtWirelessHandshake(private val hotspot: AaSdkSoftApHotspot) {
+class AaSdkBtWirelessHandshake(
+    private val hotspot: AaSdkSoftApHotspot,
+    private val confirmStart: (timeoutMs: Long) -> Boolean,
+) {
 
     private var serverSocket: BluetoothServerSocket? = null
     private var acceptThread: Thread? = null
@@ -131,16 +140,26 @@ class AaSdkBtWirelessHandshake(private val hotspot: AaSdkSoftApHotspot) {
     //   4) phone -> WifiStartResponse
     //   5) phone -> WifiConnectStatus
     private fun handleConnection(socket: BluetoothSocket, tcpPort: Int) {
-        // Started here, not when the service/BT listener comes up: a BT client
-        // on this UUID means a phone is specifically asking for wireless AA,
-        // whereas the service itself also starts for plain wired USB sessions
-        // (see UsbAttachActivity) that never need WiFi at all. Pi4's WiFi
-        // radio is single-radio (brcmfmac) -- switching it into AP mode drops
-        // any STA connection (e.g. adb-over-wifi), so it must stay off unless
-        // a phone is actually here to use it.
-        hotspot.start()
+        // Set before the confirmation gate below (not after) so a USB attach
+        // landing while the prompt is still up can still reach this socket
+        // via forceDisconnect() -- see AaSdkUsbService.connectDevice().
         activeSocket = socket
         try {
+            // Ask before ever touching the AP: a BT client on this UUID only
+            // means a phone is *asking* for wireless AA, not that the user
+            // wants it right now. Blocks this thread (see confirmStart's own
+            // doc) until Start/Cancel/timeout/USB-preemption resolves it.
+            if (!confirmStart(WIRELESS_CONFIRM_TIMEOUT_MS)) {
+                Log.i(TAG, "Wireless AA not starting (declined, timed out, or USB already active)")
+                return
+            }
+
+            // Pi4's WiFi radio is single-radio (brcmfmac) -- switching it
+            // into AP mode drops any STA connection (e.g. adb-over-wifi), so
+            // it must stay off until a phone has actually confirmed wireless
+            // AA, not just connected to this discovery socket.
+            hotspot.start()
+
             val out = socket.outputStream
             val input = socket.inputStream
 

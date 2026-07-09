@@ -19,6 +19,8 @@ import android.util.Log
 import android.view.Surface
 import java.io.IOException
 import java.net.ServerSocket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 // Matches VideoService::kDefaultConfigIndex (see AndroidVideoOutput's callers) --
 // the decoder always configures at this resolution regardless of the phone/screen.
@@ -34,6 +36,10 @@ private const val WIFI_PROJECTION_PORT = 5288
 // Matches AndroidAutoEntity::kWatchdogIntervalMs -- no point polling faster
 // than the native watchdog itself can possibly flag a new fatal event.
 private const val FATAL_CHECK_INTERVAL_MS = 2000L
+// How long AaSdkWirelessConfirmActivity waits for a Start/Cancel tap before
+// auto-declining. Shared (not private) so the Activity can drive the same
+// on-screen countdown instead of guessing a duration independently.
+const val WIRELESS_CONFIRM_TIMEOUT_MS = 18000L
 
 class AaSdkUsbService : Service() {
 
@@ -65,15 +71,28 @@ class AaSdkUsbService : Service() {
         fun onAccessoryDetached()
     }
 
+    /** Notified when a still-open wireless-start confirmation must close itself. */
+    fun interface ConfirmDismissListener {
+        fun onDismissRequested()
+    }
+
     private val binder = LocalBinder()
     private var nativeHandle = 0L
     private var usbConnection: android.hardware.usb.UsbDeviceConnection? = null
     private var attachedDevice: UsbDevice? = null
     private var detachListener: DetachListener? = null
+    private var confirmDismissListener: ConfirmDismissListener? = null
     private var wifiServerSocket: ServerSocket? = null
     private var wifiAcceptThread: Thread? = null
     private val softAp = AaSdkSoftApHotspot(this)
-    private val btWireless = AaSdkBtWirelessHandshake(softAp)
+    private val btWireless = AaSdkBtWirelessHandshake(softAp) { requestWirelessStartConfirmation(it) }
+
+    // Written from the BT accept thread (requestWirelessStartConfirmation),
+    // read/counted-down from the main thread inside the confirm Activity's
+    // binder calls -- must be @Volatile for cross-thread visibility, same as
+    // AaSdkBtWirelessHandshake.activeSocket.
+    @Volatile private var pendingConfirmLatch: CountDownLatch? = null
+    @Volatile private var pendingConfirmResult: Boolean = false
 
     // Decodes into a permanent SurfaceTexture and blits each frame onto
     // whatever on-screen Surface AaSdkScreenActivity currently provides --
@@ -101,6 +120,62 @@ class AaSdkUsbService : Service() {
 
     fun setDetachListener(listener: DetachListener?) {
         detachListener = listener
+    }
+
+    fun setConfirmDismissListener(listener: ConfirmDismissListener?) {
+        confirmDismissListener = listener
+    }
+
+    // Called from AaSdkBtWirelessHandshake's own BT accept thread (never the
+    // main thread) -- blocks that thread until the user answers the
+    // on-screen prompt, the timeout elapses, or connectDevice() preempts it
+    // because USB just attached. Returns false (no dialog shown at all) if
+    // USB is already attached, since USB always wins outright.
+    private fun requestWirelessStartConfirmation(timeoutMs: Long): Boolean {
+        if (attachedDevice != null) {
+            Log.i(TAG, "USB already attached, declining wireless AA without prompting")
+            return false
+        }
+        // Confirmed live 2026-07-09: without this check, ANY BT reconnect of
+        // an already-approved session (e.g. resetWirelessSessionForReentry()'s
+        // own forceDisconnect-then-reconnect when the AA screen is simply
+        // re-entered) re-triggered this whole prompt. The dialog then covered
+        // AaSdkScreenActivity, which made IT look backgrounded, which on
+        // resume called resetWirelessSessionForReentry() again -- an infinite
+        // reconnect/reprompt loop (AP flapping every few seconds, "socket
+        // closed" handshake failures) confirmed via logcat + activity-stack
+        // dump. detachListener is non-null for as long as AaSdkScreenActivity
+        // is alive (set in its onServiceConnected, cleared in its onDestroy),
+        // regardless of foreground/background -- a reliable "this is a
+        // reconnect within an existing engagement, not a new ask" signal.
+        if (detachListener != null) {
+            Log.i(TAG, "AA screen already active, auto-approving wireless reconnect")
+            return true
+        }
+        val latch = CountDownLatch(1)
+        pendingConfirmResult = false
+        pendingConfirmLatch = latch
+        startActivity(Intent(this, AaSdkWirelessConfirmActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        })
+        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        pendingConfirmLatch = null
+        return pendingConfirmResult
+    }
+
+    /** Called by AaSdkWirelessConfirmActivity on Start/Cancel or its own countdown. */
+    fun reportWirelessConfirmationResult(started: Boolean) {
+        pendingConfirmResult = started
+        pendingConfirmLatch?.countDown()
+    }
+
+    // Called from connectDevice() so a USB attach can preempt a still-open
+    // confirmation prompt before the user answers it. No-op if none pending.
+    private fun cancelPendingWirelessConfirmation() {
+        val latch = pendingConfirmLatch ?: return
+        pendingConfirmResult = false
+        latch.countDown()
+        confirmDismissListener?.onDismissRequested()
     }
 
     private val detachReceiver = object : BroadcastReceiver() {
@@ -250,6 +325,22 @@ class AaSdkUsbService : Service() {
 
     private fun connectDevice(device: UsbDevice) {
         if (nativeHandle == 0L) return
+        // USB always wins over a wireless session or a still-pending
+        // wireless-start prompt. All three calls are safe no-ops when
+        // nothing wireless is active/pending, so no branching is needed.
+        // Same nativeResetSession()-then-forceDisconnect() order as
+        // resetWirelessSessionForReentry(), which established that both are
+        // needed together (nativeResetSession alone left the phone's own AA
+        // app thinking the link was still fine, never reconnecting):
+        // - cancelPendingWirelessConfirmation() closes an open confirm dialog.
+        // - nativeResetSession() clears any lingering native TCP session --
+        //   without this, nativeOnAccessoryAttached()'s "session already
+        //   running" guard would silently drop this USB attach.
+        // - forceDisconnect() tears down the BT link + SoftAP (see its own
+        //   comment) if a wireless session was running.
+        cancelPendingWirelessConfirmation()
+        nativeResetSession(nativeHandle)
+        btWireless.forceDisconnect()
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
         val conn = usbManager.openDevice(device) ?: run {
             Log.e(TAG, "Cannot open device"); return

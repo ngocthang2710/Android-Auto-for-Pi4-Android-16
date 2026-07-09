@@ -101,8 +101,16 @@ bool AndroidVideoOutput::init(ANativeWindow* window, int width, int height) {
     // "nativeWindowConnect ... Invalid argument (-22)" -- a real Android
     // platform race, not a logic bug here. Matches the retry-tolerant
     // pattern this device's decoder already needs elsewhere (see warmup()).
-    constexpr int kMaxConfigureAttempts = 5;
-    constexpr auto kRetryDelay = std::chrono::milliseconds(150);
+    //
+    // Budget widened 2026-07-09: the original 5x150ms=750ms budget was tuned
+    // against a wireless-to-wireless reconnect. It was confirmed too short
+    // for AaSdkUsbService.connectDevice()'s wireless-to-USB teardown, which
+    // races BT+SoftAp/TetheringManager teardown (itself ~1-2s, see
+    // AaSdkSoftApHotspot's own AP state transitions) at the same time as
+    // this codec reconnect -- observed hitting all 5 attempts and giving up
+    // with a permanently black screen instead of eventually succeeding.
+    constexpr int kMaxConfigureAttempts = 20;
+    constexpr auto kRetryDelay = std::chrono::milliseconds(200);
     media_status_t status = AMEDIA_ERROR_UNKNOWN;
     for (int attempt = 1; attempt <= kMaxConfigureAttempts; ++attempt) {
         codec_ = AMediaCodec_createDecoderByType("video/avc");
