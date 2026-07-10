@@ -8,6 +8,7 @@ import android.net.wifi.SoftApInfo
 import android.net.wifi.SoftApState
 import android.net.wifi.WifiClient
 import android.net.wifi.WifiManager
+import android.os.SystemClock
 import android.util.Log
 import java.net.NetworkInterface
 import java.util.concurrent.Executors
@@ -20,6 +21,13 @@ private const val HOTSPOT_SSID = "AndroidAuto-HU"
 // so there's no masked-PSK problem (see git history of readWifiKey()) and no
 // need to persist/rotate anything across boots.
 private const val HOTSPOT_PASSPHRASE = "aasdkwireless"
+
+// How long after the most recent startTethering attempt an AP that still
+// isn't broadcasting is treated as wedged rather than merely slow. Must be
+// comfortably above a worst-case legitimate bring-up (a 5GHz failure plus
+// the in-flight 2.4GHz fallback fits inside handleConnection's 12s
+// waitUntilReady budget), and every fallback/restart resets the clock.
+private const val AP_WEDGE_RESTART_MS = 15_000L
 
 data class HotspotInfo(
     val ssid: String,
@@ -71,29 +79,84 @@ class AaSdkSoftApHotspot(private val context: Context) {
             return HotspotInfo(HOTSPOT_SSID, HOTSPOT_PASSPHRASE, b, ip)
         }
 
-    fun start() {
-        if (isActive) return
-        isActive = true
+    /** Band of the most recent startTethering attempt -- read by the AP
+     *  callback to decide whether a failure should retry on 2.4GHz. */
+    @Volatile private var requestedBand = SoftApConfiguration.BAND_5GHZ
 
-        val config = SoftApConfiguration.Builder()
-            .setSsid(HOTSPOT_SSID)
-            .setPassphrase(HOTSPOT_PASSPHRASE, SoftApConfiguration.SECURITY_TYPE_WPA2_PSK)
-            // BAND_5GHZ was tried first for throughput, but on this device
-            // SoftApManager rejects it: "Failed to set country code, required
-            // for setting up soft ap in band: 2" -- wificond reports the
-            // driver's country code as "99" (world mode, not a real ISO code)
-            // at the exact moment the AP interface is (re)created, and 5GHz
-            // channel selection needs a resolved regulatory domain (DFS)
-            // where 2.4GHz doesn't. Confirmed via logcat: every attempt with
-            // BAND_5GHZ went straight to WIFI_AP_STATE_FAILED, so the BT
-            // handshake never got real credentials and the phone never saw a
-            // WiFi session -- that was the actual cause of the black screen,
-            // not anything in the video/session pipeline.
-            .setBand(SoftApConfiguration.BAND_2GHZ)
-            // The BSSID is reported to the phone once, over BT, at handshake
-            // time -- it must not change under us afterwards.
-            .setMacRandomizationSetting(SoftApConfiguration.RANDOMIZATION_NONE)
-            .build()
+    /** When startTethering() last ran (elapsedRealtime), for wedge detection. */
+    @Volatile private var lastTetherAttemptMs = 0L
+
+    fun start() {
+        if (isActive) {
+            // Self-heal: isActive alone proved insufficient as the no-op
+            // guard. Observed live 2026-07-10: a session teardown's
+            // stopTethering raced the phone's instant-reconnect
+            // startTethering; the new attempt failed, its 2.4GHz fallback
+            // failed too (fallbackTo2GhzIfNeeded dead-ends once
+            // requestedBand is already 2.4GHz), and isActive stayed true
+            // with no AP and nothing scheduled to retry -- every
+            // handshake then timed out at waitUntilReady forever (wlan0
+            // sat in STA mode while this class believed an AP was up).
+            // The phone retries the handshake every ~12s, so this check
+            // runs regularly: if the AP still isn't broadcasting well past
+            // a worst-case bring-up, restart tethering from scratch.
+            if (currentInfo == null &&
+                SystemClock.elapsedRealtime() - lastTetherAttemptMs > AP_WEDGE_RESTART_MS) {
+                Log.w(TAG, "AP still not ready ${AP_WEDGE_RESTART_MS}ms after last attempt" +
+                    " -- assuming wedged, restarting tethering")
+                tetheringManager.stopTethering(TetheringManager.TETHERING_WIFI)
+                startTethering(SoftApConfiguration.BAND_5GHZ)
+            }
+            return
+        }
+        isActive = true
+        // 5GHz first: it's not just for throughput -- phones refuse to start
+        // wireless-AA projection over a 2.4GHz link (observed live: the phone
+        // joined the 2.4GHz AP, completed SSL/service discovery/channel opens
+        // over TCP, then went silent and dropped the connection ~5s in,
+        // every time). 5GHz needs a resolved regulatory domain, which is why
+        // this used to fail with "Failed to set country code, required for
+        // setting up soft ap in band: 2" -- fixed at the source by replacing
+        // ro.boot.wificountrycode=00 (world mode) with a real ISO code in
+        // device/brcm/rpi4/vendor.prop. The 2.4GHz fallback below keeps a
+        // usable (if phone-dependent) AP even if 5GHz ever fails again.
+        startTethering(SoftApConfiguration.BAND_5GHZ)
+    }
+
+    private fun buildConfig(band: Int) = SoftApConfiguration.Builder()
+        .setSsid(HOTSPOT_SSID)
+        .setPassphrase(HOTSPOT_PASSPHRASE, SoftApConfiguration.SECURITY_TYPE_WPA2_PSK)
+        .apply {
+            if (band == SoftApConfiguration.BAND_5GHZ) {
+                // Pin channel 36 (5180MHz) instead of letting the framework
+                // auto-select: auto-selection on this driver picked channel
+                // 34 (5170MHz), a legacy channel brcmfmac can't beacon on --
+                // hostapd died with "HT40 channel pair (34, 38) not allowed"
+                // then "Failed to set beacon parameters", AP-DISABLED
+                // (observed live 2026-07-10). 5180 is proven good on this
+                // exact radio: `cmd wifi start-softap ... -f 5180` came up
+                // AP-ENABLED at 80MHz/11ac, and the same chip STA-connects
+                // to 5180MHz networks.
+                setChannel(36, SoftApConfiguration.BAND_5GHZ)
+            } else {
+                setBand(band)
+            }
+        }
+        // The BSSID is reported to the phone once, over BT, at handshake
+        // time -- it must not change under us afterwards.
+        .setMacRandomizationSetting(SoftApConfiguration.RANDOMIZATION_NONE)
+        // This class fully owns the AP's lifetime (every session/handshake
+        // teardown path ends in stop()). The framework's own idle shutdown
+        // (10 min with no clients) would disable the AP behind our back
+        // while isActive stays true -- after which every start() no-ops
+        // against an AP that no longer exists and wireless AA is dead until
+        // the service restarts.
+        .setAutoShutdownEnabled(false)
+        .build()
+
+    private fun startTethering(band: Int) {
+        requestedBand = band
+        lastTetherAttemptMs = SystemClock.elapsedRealtime()
 
         val cb = object : WifiManager.SoftApCallback {
             override fun onStateChanged(state: SoftApState) {
@@ -102,6 +165,9 @@ class AaSdkSoftApHotspot(private val context: Context) {
                 if (state.state != WifiManager.WIFI_AP_STATE_ENABLED) {
                     bssid = null
                     resolvedIp = null
+                }
+                if (state.state == WifiManager.WIFI_AP_STATE_FAILED) {
+                    fallbackTo2GhzIfNeeded(band, "AP state FAILED")
                 }
             }
 
@@ -119,10 +185,13 @@ class AaSdkSoftApHotspot(private val context: Context) {
                 // time), so waitUntilReady() polls for the IP itself instead
                 // of trusting a one-shot check made here.
                 val b = softApInfo.bssid?.toString() ?: return
-                Log.i(TAG, "AP info: iface=$iface bssid=$b")
+                // frequency makes the 5GHz-vs-2.4GHz outcome visible in
+                // logcat without digging through SoftApManager's own logs.
+                Log.i(TAG, "AP info: iface=$iface bssid=$b freq=${softApInfo.frequency}MHz")
                 bssid = b
             }
         }
+        callback?.let { wifiManager.unregisterSoftApCallback(it) }
         callback = cb
         wifiManager.registerSoftApCallback(executor, cb)
 
@@ -135,7 +204,7 @@ class AaSdkSoftApHotspot(private val context: Context) {
         // through TetheringManager instead (which itself calls into
         // WifiManager) is what Settings' own hotspot toggle does.
         val request = TetheringRequest.Builder(TetheringManager.TETHERING_WIFI)
-            .setSoftApConfiguration(config)
+            .setSoftApConfiguration(buildConfig(band))
             // No carrier/entitlement setup exists on this device -- this is a
             // private, always-should-work AP for a directly-attached phone,
             // not carrier-metered tethering.
@@ -144,16 +213,53 @@ class AaSdkSoftApHotspot(private val context: Context) {
             .build()
         tetheringManager.startTethering(request, executor, object : TetheringManager.StartTetheringCallback {
             override fun onTetheringStarted() {
-                Log.i(TAG, "TetheringManager: onTetheringStarted")
+                Log.i(TAG, "TetheringManager: onTetheringStarted (band=$band)")
             }
 
             override fun onTetheringFailed(error: Int) {
                 Log.e(TAG, "TetheringManager: onTetheringFailed error=$error")
+                fallbackTo2GhzIfNeeded(band, "tethering error=$error")
             }
         })
     }
 
+    // Last-resort degradation: a 2.4GHz AP is known to make (at least some)
+    // phones abort wireless-AA projection right after connecting, but it is
+    // still strictly better than no AP at all -- and it was the only band
+    // this device could serve before the country-code fix, so keep it as a
+    // safety net against regulatory-domain regressions.
+    private fun fallbackTo2GhzIfNeeded(failedBand: Int, reason: String) {
+        if (!isActive) return
+        // A single attempt can fail through two callbacks (SoftApCallback's
+        // AP state FAILED and StartTetheringCallback's onTetheringFailed),
+        // and the earlier band's failure can arrive after the fallback has
+        // already moved requestedBand on -- acting on such a stale report
+        // would wrongly condemn the in-flight attempt.
+        if (failedBand != requestedBand) return
+        if (requestedBand == SoftApConfiguration.BAND_2GHZ) {
+            // Both bands have now failed -- typically because this attempt
+            // raced a still-in-flight stopTethering (tethering error=5,
+            // observed live 2026-07-10). Nothing further will happen on its
+            // own, so mark the attempt clock as expired: the phone's next
+            // RFCOMM reconnect calls start(), whose wedge check then
+            // restarts tethering immediately instead of sitting out the
+            // full AP_WEDGE_RESTART_MS window.
+            Log.e(TAG, "2.4GHz fallback failed too ($reason), letting the next start() restart tethering")
+            lastTetherAttemptMs = 0L
+            return
+        }
+        Log.e(TAG, "5GHz AP failed ($reason), falling back to 2.4GHz")
+        tetheringManager.stopTethering(TetheringManager.TETHERING_WIFI)
+        startTethering(SoftApConfiguration.BAND_2GHZ)
+    }
+
     fun stop() {
+        // Idempotent, and a no-op when start() never ran -- callers use
+        // stop() as a safety net (e.g. AaSdkBtWirelessHandshake.stop()), and
+        // an AP that was never started must not trigger a system-wide
+        // stopTethering (observed live 2026-07-10: the decline retry storm
+        // called this ~15x/second, spamming TetheringManager the whole time).
+        if (!isActive) return
         isActive = false
         resolvedIp = null
         bssid = null
@@ -172,6 +278,11 @@ class AaSdkSoftApHotspot(private val context: Context) {
     fun waitUntilReady(timeoutMs: Long): HotspotInfo? {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
+            // Dead-end marker from fallbackTo2GhzIfNeeded: both bands have
+            // failed and nothing more will happen on its own -- burning the
+            // rest of this budget just delays the reconnect whose start()
+            // performs the restart.
+            if (lastTetherAttemptMs == 0L) return null
             currentInfo?.let { return it }
             val ifaceName = iface
             val b = bssid

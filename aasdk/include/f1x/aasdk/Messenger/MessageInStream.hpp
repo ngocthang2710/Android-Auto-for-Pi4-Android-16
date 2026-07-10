@@ -18,6 +18,8 @@
 
 #pragma once
 
+#include <map>
+
 #include <f1x/aasdk/Transport/ITransport.hpp>
 #include <f1x/aasdk/Messenger/IMessageInStream.hpp>
 #include <f1x/aasdk/Messenger/ICryptor.hpp>
@@ -44,13 +46,20 @@ private:
     void receiveFrameHeaderHandler(const common::DataConstBuffer& buffer);
     void receiveFrameSizeHandler(const common::DataConstBuffer& buffer);
     void receiveFramePayloadHandler(const common::DataConstBuffer& buffer);
+    void resetReceiveState();
 
     boost::asio::io_service::strand strand_;
     transport::ITransport::Pointer transport_;
     ICryptor::Pointer cryptor_;
     FrameType recentFrameType_;
     ReceivePromise::Pointer promise_;
-    Message::Pointer message_;
+
+    // The message the frame currently on the wire belongs to (set by each
+    // frame's header, used by its payload handler). Distinct from the
+    // per-channel reassembly state below: frames of *different* channels
+    // legally interleave between one message's FIRST and LAST frames.
+    Message::Pointer currentMessage_;
+    std::map<ChannelId, Message::Pointer> pendingMessages_;
 };
 
 }

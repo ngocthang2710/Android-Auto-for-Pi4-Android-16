@@ -42,6 +42,12 @@ Full protocol diagrams, a breakdown of every new component, and the
 debugging log of every bug found and fixed getting this to actually render
 video on real hardware: **[docs/wireless-android-auto.md](docs/wireless-android-auto.md)**.
 
+The follow-up patch series that took it from "renders once, then dies" to a
+**stable 5GHz session** (regulatory/HAL/channel fixes for the 5GHz AP, the
+aasdk interleaved-frames freeze, a teardown-race SIGSEGV, service lifecycle,
+and every reconnect storm/wedge/livelock):
+**[docs/wireless-stabilization-fixes.md](docs/wireless-stabilization-fixes.md)**.
+
 ## What's new here, on top of the wired base
 
 - **`app/src/main/java/com/android/car/aasdk/AaSdkBtWirelessHandshake.kt`** --

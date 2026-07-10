@@ -122,6 +122,19 @@ class AaSdkUsbService : Service() {
     // onServiceConnected calls clearWirelessDecline()), or a real engagement
     // actually ends (onAccessoryDetached()).
     @Volatile private var userDeclinedWireless = false
+
+    // True only while a wireless (TCP) projection session is actually
+    // connected -- set when the WiFi listener hands a socket to native,
+    // cleared wherever that session ends (onAccessoryDetached, or USB
+    // preempting it in connectDevice). resetWirelessSessionForReentry()
+    // used to infer "wireless session" from attachedDevice == null alone,
+    // which is also true when there's NO session at all -- so merely
+    // re-entering the AA screen force-closed whatever the BT handshake
+    // thread was doing at that moment (observed live 2026-07-10: it killed
+    // a just-approved handshake mid-flight, "BT wireless handshake failed:
+    // socket closed", costing a full AP restart and ~15s of reconnect
+    // churn before the phone got through).
+    @Volatile private var wirelessTcpSessionActive = false
     private var wifiServerSocket: ServerSocket? = null
     private var wifiAcceptThread: Thread? = null
     private val softAp = AaSdkSoftApHotspot(this)
@@ -172,6 +185,13 @@ class AaSdkUsbService : Service() {
     // with the app again; see userDeclinedWireless's own comment.
     fun clearWirelessDecline() {
         userDeclinedWireless = false
+        // A declined phone's BT link is parked open (see handleConnection),
+        // so with only the flag cleared nothing would ever reprompt -- the
+        // phone is still quietly waiting on the parked link. Cutting it
+        // makes the phone reconnect immediately, which now (decline
+        // cleared) reaches a fresh confirm prompt. No-op for a live
+        // session's link.
+        btWireless.disconnectIfParked()
     }
 
     // Called from AaSdkBtWirelessHandshake's own BT accept thread (never the
@@ -285,6 +305,18 @@ class AaSdkUsbService : Service() {
         super.onCreate()
         createNotificationChannel()
         startForeground(NOTIF_ID, buildNotification())
+        // Self-promote to a *started* service no matter how this instance
+        // came to exist. Observed live 2026-07-10: after a native crash
+        // killed the process, the system restored only the top Activity,
+        // whose bindService(BIND_AUTO_CREATE) recreated this service
+        // bound-only -- so the moment that Activity finished and unbound
+        // (goHomeAndFinish after a session teardown), the system destroyed
+        // the service and every listener with it (am_foreground_service_stop
+        // in the event log), leaving wireless AA deaf until reboot. A
+        // started service survives its last unbind; this call is a cheap
+        // no-op re-delivery when the service was already started normally
+        // (boot receiver / USB attach).
+        startForegroundService(Intent(this, AaSdkUsbService::class.java))
         nativeHandle = nativeCreate()
         if (nativeHandle == 0L) Log.e(TAG, "nativeCreate failed")
         val blitter = VideoBlitter(VIDEO_WIDTH, VIDEO_HEIGHT)
@@ -325,17 +357,30 @@ class AaSdkUsbService : Service() {
     // one thing observed to reliably make the phone redo its full 5-stage
     // handshake and reconnect.
     fun resetWirelessSessionForReentry() {
-        if (nativeHandle != 0L && attachedDevice == null) {
+        if (nativeHandle != 0L && attachedDevice == null && wirelessTcpSessionActive) {
             Log.i(TAG, "Re-entering AA screen on a wireless session -- forcing reconnect")
+            wirelessTcpSessionActive = false
             nativeResetSession(nativeHandle)
             btWireless.forceDisconnect()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val device = intent?.getParcelableExtra<UsbDevice>(EXTRA_USB_DEVICE) ?: return START_NOT_STICKY
-        connectDevice(device)
-        return START_NOT_STICKY
+        // Every startForegroundService() call (boot receiver, onCreate's
+        // self-promotion, a future caller) creates its own "must call
+        // startForeground" obligation -- re-asserting it here is idempotent
+        // and keeps any of those paths from tripping the FGS-timeout kill.
+        startForeground(NOTIF_ID, buildNotification())
+        val device = intent?.getParcelableExtra<UsbDevice>(EXTRA_USB_DEVICE)
+        if (device != null) connectDevice(device)
+        // START_STICKY, not NOT_STICKY: this service hosts the always-on
+        // RFCOMM/TCP listeners, so a process death must not permanently
+        // drop the started state. With NOT_STICKY, a native crash left
+        // nothing scheduled to bring the listeners back (see onCreate's
+        // comment for what that did to wireless AA). On a sticky restart
+        // intent is null -- no device, listeners come back up via
+        // onCreate, which is exactly what's wanted.
+        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -373,6 +418,7 @@ class AaSdkUsbService : Service() {
                         socket.close()
                         if (nativeHandle != 0L) {
                             nativeOnTcpAccepted(nativeHandle, fd)
+                            wirelessTcpSessionActive = true
                             startActivity(Intent(this, AaSdkScreenActivity::class.java).apply {
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             })
@@ -401,6 +447,7 @@ class AaSdkUsbService : Service() {
         usbConnection?.close()
         usbConnection = null
         attachedDevice = null
+        wirelessTcpSessionActive = false
         // The engagement (USB or wireless) has genuinely ended here -- the
         // next BT client to connect must go through a fresh confirm, no
         // matter what the UI happens to be doing (see wirelessEngagementApproved's
@@ -410,6 +457,18 @@ class AaSdkUsbService : Service() {
         // as the user reopening the app.
         wirelessEngagementApproved = false
         userDeclinedWireless = false
+        // If this teardown came from a wireless session dying (fatal
+        // transport error / phone closing the TCP side), the phone often
+        // keeps its BT RFCOMM link open and idle -- which leaves
+        // handleConnection()'s read loop blocked forever on a socket that
+        // will never carry another handshake, the SoftAP up, and accept()
+        // never re-armed: wireless AA is then dead until something external
+        // (BT toggle, app restart) breaks the loop. Dropping the BT link is
+        // also the one signal observed to reliably make the phone redo its
+        // 5-stage discovery handshake (see resetWirelessSessionForReentry).
+        // Safe no-op for a plain USB detach: no wireless engagement means no
+        // active BT socket to close.
+        btWireless.forceDisconnect()
         detachListener?.onAccessoryDetached()
     }
 
@@ -445,6 +504,7 @@ class AaSdkUsbService : Service() {
         //   comment) if a wireless session was running.
         cancelPendingWirelessConfirmation()
         nativeResetSession(nativeHandle)
+        wirelessTcpSessionActive = false
         btWireless.forceDisconnect()
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
         val conn = usbManager.openDevice(device) ?: run {

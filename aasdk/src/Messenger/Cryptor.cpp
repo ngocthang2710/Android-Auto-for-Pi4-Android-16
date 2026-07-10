@@ -113,6 +113,15 @@ void Cryptor::deinit()
 {
     std::lock_guard<decltype(mutex_)> lock(mutex_);
 
+    // Must go back to inactive: a send already queued on the Messenger
+    // strand can run encrypt() after this teardown (observed live
+    // 2026-07-10 as a SIGSEGV in SSL_write(nullptr) that killed the whole
+    // app process). With isActive_ false and the null guards in
+    // encrypt()/decrypt() below, that race now surfaces as a normal
+    // error::Error the send path already handles (promise reject ->
+    // channel error) instead of a native crash.
+    isActive_ = false;
+
     if(ssl_ != nullptr)
     {
         sslWrapper_->free(ssl_);
@@ -144,6 +153,11 @@ bool Cryptor::doHandshake()
 {
     std::lock_guard<decltype(mutex_)> lock(mutex_);
 
+    if(ssl_ == nullptr)
+    {
+        throw error::Error(error::ErrorCode::SSL_HANDSHAKE);
+    }
+
     auto result = sslWrapper_->doHandshake(ssl_);
     if(result == SSL_ERROR_WANT_READ)
     {
@@ -164,6 +178,14 @@ size_t Cryptor::encrypt(common::Data& output, const common::DataConstBuffer& buf
 {
     std::lock_guard<decltype(mutex_)> lock(mutex_);
 
+    // deinit() may already have run (session teardown racing a queued
+    // send) -- SSL_write(nullptr) is a guaranteed SIGSEGV, so fail as a
+    // normal SSL error instead.
+    if(ssl_ == nullptr)
+    {
+        throw error::Error(error::ErrorCode::SSL_WRITE);
+    }
+
     size_t totalWrittenBytes = 0;
 
     while(totalWrittenBytes < buffer.size)
@@ -179,14 +201,22 @@ size_t Cryptor::encrypt(common::Data& output, const common::DataConstBuffer& buf
         totalWrittenBytes += writeSize;
     }
 
-    const auto ciphertextSize = this->read(output);
-    AASDK_CRYPTOR_LOGI("encrypt: plaintext=%zu -> ciphertext=%zu", buffer.size, ciphertextSize);
-    return ciphertextSize;
+    // No per-call logging here: this runs for every frame (60-120 log
+    // lines/second during video), which both costs CPU on the Pi4 and
+    // rotates the whole logcat buffer within minutes, destroying the
+    // evidence needed to debug anything else.
+    return this->read(output);
 }
 
 size_t Cryptor::decrypt(common::Data& output, const common::DataConstBuffer& buffer)
 {
     std::lock_guard<decltype(mutex_)> lock(mutex_);
+
+    // Same teardown race as encrypt() -- see the guard there.
+    if(ssl_ == nullptr)
+    {
+        throw error::Error(error::ErrorCode::SSL_READ);
+    }
 
     this->write(buffer);
     const size_t beginOffset = output.size();
@@ -210,13 +240,18 @@ size_t Cryptor::decrypt(common::Data& output, const common::DataConstBuffer& buf
         output.resize(output.size() + availableBytes);
     }
 
-    AASDK_CRYPTOR_LOGI("decrypt: ciphertext=%zu -> plaintext=%zu", buffer.size, totalReadSize);
+    // See encrypt() for why this deliberately doesn't log per call.
     return totalReadSize;
 }
 
 common::Data Cryptor::readHandshakeBuffer()
 {
     std::lock_guard<decltype(mutex_)> lock(mutex_);
+
+    if(ssl_ == nullptr)
+    {
+        throw error::Error(error::ErrorCode::SSL_BIO_READ);
+    }
 
     common::Data output;
     this->read(output);
@@ -226,6 +261,11 @@ common::Data Cryptor::readHandshakeBuffer()
 void Cryptor::writeHandshakeBuffer(const common::DataConstBuffer& buffer)
 {
     std::lock_guard<decltype(mutex_)> lock(mutex_);
+
+    if(ssl_ == nullptr)
+    {
+        throw error::Error(error::ErrorCode::SSL_BIO_WRITE);
+    }
 
     this->write(buffer);
 }

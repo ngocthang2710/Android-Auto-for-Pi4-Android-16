@@ -119,7 +119,9 @@ void AudioService::onAVMediaIndication(const common::DataConstBuffer& buf) {
 }
 
 void AudioService::onChannelError(const error::Error& e) {
+    // See AndroidAutoEntity::onChannelError for why this re-arm is required.
     LOGE("channel error: %s", e.what());
+    channel_->receive(shared_from_this());
 }
 
 } // namespace aasdk_android

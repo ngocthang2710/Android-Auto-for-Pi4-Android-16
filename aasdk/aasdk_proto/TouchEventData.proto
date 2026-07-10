@@ -26,7 +26,10 @@ package f1x.aasdk.proto.data;
 message TouchEvent
 {
     repeated data.TouchLocation touch_location = 1;
-    uint32 action_index = 2;
+    // Same zero-omission issue as touch_action below: action_index is
+    // always 0 for this single-pointer HU and was being silently dropped
+    // from the wire without `optional`.
+    optional uint32 action_index = 2;
     // `optional` forces this to always be present on the wire, even when
     // PRESS (its zero value) is set -- plain proto3 fields silently omit
     // zero values, so every DOWN/PRESS event (touch_action=0) was being

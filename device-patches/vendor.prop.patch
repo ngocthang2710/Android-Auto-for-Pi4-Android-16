@@ -1,0 +1,16 @@
+diff --git a/vendor.prop b/vendor.prop
+index ac28c70..06d5dcc 100644
+--- a/vendor.prop
++++ b/vendor.prop
+@@ -72,5 +72,10 @@ ro.vendor.v4l2_codec2.encode_concurrent_instances=8
+ ro.boot.hypervisor.vm.supported=1
+ 
+ # Wifi
+-ro.boot.wificountrycode=00
++# A real ISO country code (not "00" world mode) is required for the WiFi
++# stack to resolve a 5GHz regulatory domain -- without it SoftApManager
++# rejects any BAND_5GHZ SoftAp with "Failed to set country code", and
++# wireless Android Auto needs a 5GHz AP (phones refuse to start projection
++# on a 2.4GHz link: session connects, then GearHead drops it seconds later).
++ro.boot.wificountrycode=VN
+ wifi.interface=wlan0

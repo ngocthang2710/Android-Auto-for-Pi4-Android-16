@@ -22,7 +22,12 @@ package f1x.aasdk.proto.data;
 
 message TouchLocation
 {
-	uint32 x = 1;
-	uint32 y = 2;
-	uint32 pointer_id = 3;
+	// `optional` forces explicit wire presence even at value 0 -- plain
+	// proto3 fields silently omit zero values. pointer_id is always 0 for
+	// this single-pointer HU, and x/y=0 is a legitimate top/left-edge tap,
+	// so all three need this (same bug class as TouchEvent.touch_action,
+	// see TouchEventData.proto).
+	optional uint32 x = 1;
+	optional uint32 y = 2;
+	optional uint32 pointer_id = 3;
 }

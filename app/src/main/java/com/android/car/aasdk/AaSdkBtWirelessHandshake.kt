@@ -70,6 +70,13 @@ class AaSdkBtWirelessHandshake(
     // already handed to handleConnection()).
     @Volatile private var activeSocket: BluetoothSocket? = null
 
+    // True while the current connection is parked (held open after a
+    // decline, see handleConnection) rather than carrying a session --
+    // lets clearWirelessDecline() cut exactly this state (so the phone
+    // reconnects and gets a fresh prompt) without ever touching a live
+    // session's BT link.
+    @Volatile private var parked = false
+
     fun start(tcpPort: Int) {
         val adapter = BluetoothAdapter.getDefaultAdapter()
         if (adapter == null) {
@@ -114,6 +121,14 @@ class AaSdkBtWirelessHandshake(
                         break
                     }
                     Log.e(TAG, "RFCOMM listener failed, re-arming: ${e.message}", e)
+                    // Each re-arm opens a fresh BluetoothServerSocket; without
+                    // this close the dead one stays registered in the BT stack
+                    // (holding an SCN) until its finalizer happens to run.
+                    try {
+                        serverSocket?.close()
+                    } catch (ce: IOException) {
+                        // already closed
+                    }
                     try {
                         Thread.sleep(RFCOMM_RELISTEN_DELAY_MS)
                     } catch (ie: InterruptedException) {
@@ -127,6 +142,10 @@ class AaSdkBtWirelessHandshake(
 
     fun stop() {
         acceptThread?.interrupt()
+        // interrupt() doesn't break a blocking socket read -- a connection
+        // sitting in holdOpenUntilClosed() (live session hold or a parked
+        // decline) only unblocks when its socket is closed under it.
+        forceDisconnect()
         try {
             serverSocket?.close()
         } catch (e: IOException) {
@@ -162,6 +181,16 @@ class AaSdkBtWirelessHandshake(
         }
     }
 
+    // Closes the BT link only if it's a parked (declined) one -- used by
+    // AaSdkUsbService.clearWirelessDecline() so that the user reopening the
+    // app immediately gets a fresh prompt: with the decline cleared but the
+    // old link still parked, the phone would otherwise keep waiting silently
+    // on a connection that will never handshake. A live session's link is
+    // deliberately left alone (parked is false then).
+    fun disconnectIfParked() {
+        if (parked) forceDisconnect()
+    }
+
     // Canonical 5-stage handshake, confirmed against aa-proxy-rs's own
     // stage-numbered log messages (our first attempt had this backwards --
     // WifiInfoResponse pushed before WifiStartRequest, never reading
@@ -177,13 +206,32 @@ class AaSdkBtWirelessHandshake(
         // landing while the prompt is still up can still reach this socket
         // via forceDisconnect() -- see AaSdkUsbService.connectDevice().
         activeSocket = socket
+        // Only a connection whose handshake actually COMPLETED owns tearing
+        // the AP down (set true just before the post-handshake hold loop).
+        // Declined connections must never stopTethering (the finally block
+        // used to call hotspot.stop() unconditionally, ~15x/second during
+        // the decline retry storm), and failed/aborted handshakes must
+        // leave the AP up for the phone's instant retry (see the comment
+        // above hotspot.start() below).
+        var stopHotspotOnExit = false
         try {
             // Ask before ever touching the AP: a BT client on this UUID only
             // means a phone is *asking* for wireless AA, not that the user
             // wants it right now. Blocks this thread (see confirmStart's own
             // doc) until Start/Cancel/timeout/USB-preemption resolves it.
             if (!confirmStart(WIRELESS_CONFIRM_TIMEOUT_MS)) {
-                Log.i(TAG, "Wireless AA not starting (declined, timed out, or USB already active)")
+                // Park the link open instead of closing it: closing is what
+                // the phone answers with an instant RFCOMM reconnect
+                // (~50-100ms gap, observed live 2026-07-10 -- an accept/
+                // decline/close storm at ~15Hz for as long as the sticky
+                // decline held). Held open, the phone just waits quietly for
+                // a WifiStartRequest that never comes. The park ends when
+                // the phone gives up, its ACL drops, or forceDisconnect()/
+                // disconnectIfParked() cuts it (USB attach/detach, the user
+                // reopening the app, engagement teardown).
+                Log.i(TAG, "Wireless AA not starting (declined, timed out, or USB already active); parking BT link")
+                parked = true
+                holdOpenUntilClosed(socket.inputStream)
                 return
             }
 
@@ -191,16 +239,32 @@ class AaSdkBtWirelessHandshake(
             // into AP mode drops any STA connection (e.g. adb-over-wifi), so
             // it must stay off until a phone has actually confirmed wireless
             // AA, not just connected to this discovery socket.
+            //
+            // Note stopHotspotOnExit deliberately stays false through the
+            // whole 5-stage handshake below, not just this call: a 5GHz
+            // bring-up takes ~8-9s (hostapd HT scan) while the phone only
+            // waits ~5-8s on a silent RFCOMM link before hanging up -- so
+            // the connection that *starts* the AP often dies ("Broken
+            // pipe") right as the AP becomes ready. Tearing the AP down on
+            // that death (the old behavior) fed a livelock observed live
+            // 2026-07-10: stop raced the reconnect's start (tethering
+            // error=5), the 2.4GHz fallback dead-ended, and every ~34s the
+            // whole cycle repeated without a single completed handshake.
+            // Left up, the phone's instant retry finds waitUntilReady()
+            // returning immediately and gets its WifiStartRequest within
+            // milliseconds of connecting.
             hotspot.start()
 
             val out = socket.outputStream
             val input = socket.inputStream
 
             // Cold-start budget: bringing up hostapd + the AP interface from
-            // scratch (not pre-warmed) can take a couple seconds.
-            val info = hotspot.waitUntilReady(timeoutMs = 8000)
+            // scratch (not pre-warmed) can take a couple seconds -- and if the
+            // 5GHz attempt fails, AaSdkSoftApHotspot tears down and retries on
+            // 2.4GHz within this same window, so leave room for both.
+            val info = hotspot.waitUntilReady(timeoutMs = 12000)
             if (info == null) {
-                Log.e(TAG, "SoftAP not broadcasting yet, aborting handshake")
+                Log.e(TAG, "SoftAP not broadcasting yet, aborting handshake (AP left warming for the retry)")
                 return
             }
 
@@ -216,6 +280,15 @@ class AaSdkBtWirelessHandshake(
             logInboundFrame(readFrame(input, 3000), "Stage 4/5 (expect WifiStartResponse)")
             logInboundFrame(readFrame(input, 3000), "Stage 5/5 (expect WifiConnectStatus)")
 
+            // Only now does this connection own the AP's teardown: the
+            // handshake got through, so this BT link ending from here on
+            // means the wireless engagement itself is over (phone closing
+            // its end after a real disconnect, forceDisconnect() on USB
+            // preemption / session teardown / re-entry reset) -- see the
+            // comment above hotspot.start() for why earlier failures must
+            // NOT take the AP down with them.
+            stopHotspotOnExit = true
+
             // The active AA session now lives entirely on the TCP socket, but
             // the phone still expects this BT link to stay up (likely for
             // WifiPingRequest/Response keepalives, per the ProxyMessageId
@@ -225,15 +298,7 @@ class AaSdkBtWirelessHandshake(
             // that was the "unstable connection" symptom. Block indefinitely
             // instead; only the phone closing its end (or the service tearing
             // down) should end this.
-            try {
-                while (input.read() >= 0) {
-                    // Not parsing frames here: this is just "stay connected and
-                    // don't hang up first." A future iteration could decode and
-                    // answer WifiPingRequest explicitly if needed.
-                }
-            } catch (e: IOException) {
-                // phone closed its end
-            }
+            holdOpenUntilClosed(input)
         } catch (e: Exception) {
             Log.e(TAG, "BT wireless handshake failed: ${e.message}")
         } finally {
@@ -241,13 +306,29 @@ class AaSdkBtWirelessHandshake(
             // not this BT link, but this BT link is held open for the entire
             // session (see the indefinite read loop above) -- so it ending is
             // the right signal that the AP is no longer needed either.
+            parked = false
             activeSocket = null
-            hotspot.stop()
+            if (stopHotspotOnExit) hotspot.stop()
             try {
                 socket.close()
             } catch (e: IOException) {
                 // ignore
             }
+        }
+    }
+
+    // Blocks until the far end (or forceDisconnect()) closes the link. Used
+    // both to hold a live session's BT link open for its whole lifetime and
+    // to park a declined connection -- in both cases the one job is "stay
+    // connected and don't hang up first."
+    private fun holdOpenUntilClosed(input: InputStream) {
+        try {
+            while (input.read() >= 0) {
+                // Not parsing frames here. A future iteration could decode and
+                // answer WifiPingRequest explicitly if needed.
+            }
+        } catch (e: IOException) {
+            // far end closed, or forceDisconnect() cut the socket
         }
     }
 

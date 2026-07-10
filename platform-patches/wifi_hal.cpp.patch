@@ -1,0 +1,62 @@
+diff --git a/bcmdhd/wifi_hal/wifi_hal.cpp b/bcmdhd/wifi_hal/wifi_hal.cpp
+index 404a104..cf5dbf2 100644
+--- a/bcmdhd/wifi_hal/wifi_hal.cpp
++++ b/bcmdhd/wifi_hal/wifi_hal.cpp
+@@ -1129,6 +1129,34 @@ public:
+     }
+ };
+ 
++/* Standard nl80211 regulatory hint (the same request `iw reg set` issues).
++ * Fallback for drivers that don't implement the GOOGLE_OUI vendor
++ * subcommand above -- notably upstream brcmfmac on Raspberry Pi, which
++ * NAKs every Android vendor command. Without a working set-country-code,
++ * SoftApManager refuses to bring up any 5GHz AP at all ("Failed to set
++ * country code, required for setting up soft ap in band: 2"). */
++class SetRegDomainCommand : public WifiCommand {
++private:
++    const char *mCountryCode;
++public:
++    SetRegDomainCommand(wifi_interface_handle handle, const char *country_code)
++        : WifiCommand("SetRegDomainCommand", handle, 0) {
++        mCountryCode = country_code;
++        }
++    virtual int create() {
++        int ret;
++
++        /* Global (per-wiphy-core) request -- deliberately no IFINDEX. */
++        ret = mMsg.create(NL80211_CMD_REQ_SET_REG);
++        if (ret < 0) {
++             ALOGE("Can't create REQ_SET_REG message - %d", ret);
++             return ret;
++        }
++
++        return mMsg.put_string(NL80211_ATTR_REG_ALPHA2, mCountryCode);
++    }
++};
++
+ class SetRSSIMonitorCommand : public WifiCommand {
+ private:
+     s8 mMax_rssi;
+@@ -2005,7 +2033,21 @@ wifi_error wifi_set_nodfs_flag(wifi_interface_handle handle, u32 nodfs)
+ wifi_error wifi_set_country_code(wifi_interface_handle handle, const char *country_code)
+ {
+     SetCountryCodeCommand command(handle, country_code);
+-    return (wifi_error) command.requestResponse();
++    wifi_error result = (wifi_error) command.requestResponse();
++    if (result == WIFI_SUCCESS) {
++        return result;
++    }
++
++    /* See SetRegDomainCommand: brcmfmac and other upstream drivers reject
++     * the vendor command, and a failure here makes the framework abort
++     * every 5GHz SoftAp start. The standard regulatory hint achieves the
++     * same end state (regdomain set for the requested country). */
++    ALOGI("Vendor set-country-code failed (%d), retrying as REQ_SET_REG(%s)",
++          result, country_code);
++    SetRegDomainCommand fallback(handle, country_code);
++    result = (wifi_error) fallback.requestResponse();
++    ALOGI("REQ_SET_REG(%s) result: %d", country_code, result);
++    return result;
+ }
+ 
+ static wifi_error wifi_start_rssi_monitoring(wifi_request_id id, wifi_interface_handle

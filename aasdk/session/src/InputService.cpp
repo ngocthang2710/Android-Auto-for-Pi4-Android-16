@@ -113,7 +113,9 @@ void InputService::injectTouchEvent(int action, float x, float y) {
 }
 
 void InputService::onChannelError(const error::Error& e) {
+    // See AndroidAutoEntity::onChannelError for why this re-arm is required.
     LOGE("channel error: %s", e.what());
+    channel_->receive(shared_from_this());
 }
 
 } // namespace aasdk_android
