@@ -18,8 +18,62 @@ session after this patch series: music + maps rendering simultaneously —
 exactly the split-video-plus-audio load that used to kill every session at
 the ~20s mark (section 2).*
 
-All commits land on the `aa_wireless` branch; paths below are repo paths with
-their AOSP-tree destinations noted where they differ.
+All commits land on the `aa_wireless` branch.
+
+---
+
+## Complete file inventory
+
+Every file this patch series changes, with its exact location in the AOSP-16
+build tree (paths are relative to the tree root — on the reference machine
+that root is `/home/thangnn/Android-16/source/`) and where it lives in this
+repo. `app/` and `aasdk/` are full-source mirrors (copy the whole directory
+over); `device-patches/` and `platform-patches/` are `git apply`-style diffs
+against the pristine tree.
+
+### Changed in this series
+
+| # | AOSP tree path | Repo path | Fix |
+|---|---|---|---|
+| 1 | `hardware/broadcom/wlan/bcmdhd/wifi_hal/wifi_hal.cpp` | `platform-patches/wifi_hal.cpp.patch` | §1b `REQ_SET_REG` fallback for brcmfmac country code |
+| 2 | `device/brcm/rpi4/vendor.prop` | `device-patches/vendor.prop.patch` | §1a `ro.boot.wificountrycode` `00` → `VN` |
+| 3 | `device/brcm/rpi4/aosp_rpi4_car.mk` | `device-patches/aosp_rpi4_car.mk.patch` | §1c `bluetooth.profile.map.client.enabled=false` (patch also carries the earlier wired-era product changes) |
+| 4 | `external/aasdk/src/Messenger/MessageInStream.cpp` | `aasdk/src/Messenger/MessageInStream.cpp` | §2 per-channel frame reassembly (the freeze) |
+| 5 | `external/aasdk/include/f1x/aasdk/Messenger/MessageInStream.hpp` | `aasdk/include/f1x/aasdk/Messenger/MessageInStream.hpp` | §2 members for per-channel reassembly |
+| 6 | `external/aasdk/src/Messenger/Cryptor.cpp` | `aasdk/src/Messenger/Cryptor.cpp` | §3 `SSL_write(nullptr)` guards; per-frame log removal |
+| 7 | `packages/apps/AaSdkUsbBridge/src/main/java/com/android/car/aasdk/AaSdkBtWirelessHandshake.kt` | `app/src/main/java/com/android/car/aasdk/AaSdkBtWirelessHandshake.kt` | §5.1 parked declines; §5.2 AP teardown ownership |
+| 8 | `packages/apps/AaSdkUsbBridge/src/main/java/com/android/car/aasdk/AaSdkSoftApHotspot.kt` | `app/src/main/java/com/android/car/aasdk/AaSdkSoftApHotspot.kt` | §1c pinned channel 36; §5.3 wedge self-heal; §5.4 band-tagged failure callbacks |
+| 9 | `packages/apps/AaSdkUsbBridge/src/main/java/com/android/car/aasdk/AaSdkUsbService.kt` | `app/src/main/java/com/android/car/aasdk/AaSdkUsbService.kt` | §4 `START_STICKY` + self-promotion; §5.5 re-entry reset gating |
+| 10 | `external/aasdk/session/src/AVInputService.cpp` | `aasdk/session/src/AVInputService.cpp` | §6 channel receive re-arm |
+| 11 | `external/aasdk/session/src/AudioService.cpp` | `aasdk/session/src/AudioService.cpp` | §6 channel receive re-arm |
+| 12 | `external/aasdk/session/src/BluetoothService.cpp` | `aasdk/session/src/BluetoothService.cpp` | §6 channel receive re-arm |
+| 13 | `external/aasdk/session/src/InputService.cpp` | `aasdk/session/src/InputService.cpp` | §6 channel receive re-arm |
+| 14 | `external/aasdk/session/src/SensorService.cpp` | `aasdk/session/src/SensorService.cpp` | §6 channel receive re-arm |
+| 15 | `external/aasdk/aasdk_proto/TouchEventData.proto` | `aasdk/aasdk_proto/TouchEventData.proto` | §6 proto3 `optional` on `action_index` |
+| 16 | `external/aasdk/aasdk_proto/TouchLocationData.proto` | `aasdk/aasdk_proto/TouchLocationData.proto` | §6 proto3 `optional` on `x`/`y`/`pointer_id` |
+
+### The rest of the project's tree footprint (earlier commits, unchanged here)
+
+Listed so the full set of files this project touches in the AOSP tree is in
+one place — nothing outside these paths (plus the two mirror directories) is
+modified:
+
+| AOSP tree path | Repo path | Purpose |
+|---|---|---|
+| `external/aasdk/` (entire directory: `Android.bp`, `aasdk_proto/`, `include/`, `src/`, `session/`, `jni/`) | `aasdk/` | the ported aasdk library + native session layer (new directory, not in stock AOSP) |
+| `packages/apps/AaSdkUsbBridge/` (entire directory: `Android.bp`, `AndroidManifest.xml`, `com.android.car.aasdk.xml`, all `*.kt`) | `app/` | the head-unit app: `AaSdkUsbService`, `AaSdkScreenActivity`, `AaSdkBtWirelessHandshake`, `AaSdkSoftApHotspot`, `AaSdkWirelessConfirmActivity`, `AaSdkBootReceiver`, `UsbAttachActivity`, `AaSdkAoapService`, `VideoBlitter` (new directory) |
+| `device/brcm/rpi4/sepolicy/platform_app.te` | `device-patches/sepolicy_platform_app.te.patch` | allow `platform_app` `r_dir_file` on `usb_device` for libusb |
+| `device/brcm/rpi4/permissions/Android.bp` | `device-patches/permissions/Android.bp` | registers the two default-permission XMLs below |
+| `device/brcm/rpi4/permissions/default-permissions-com.android.car.aasdk.xml` | `device-patches/permissions/default-permissions-com.android.car.aasdk.xml` | runtime-permission pre-grants for the app |
+| `device/brcm/rpi4/permissions/default-permissions-com.android.systemui.xml` | `device-patches/permissions/default-permissions-com.android.systemui.xml` | `BLUETOOTH_CONNECT` grant — CarSystemUI crash-loops without it |
+| `frameworks/base/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionRepositoryImpl.kt` | `platform-patches/MobileConnectionRepositoryImpl.kt.patch` | SystemUI crash on BT-HFP telephony subscription (modem-less build) |
+| `frameworks/base/services/core/java/com/android/server/net/NetworkPolicyManagerService.java` | `platform-patches/NetworkPolicyManagerService.java.patch` | `system_server` boot crash-loop on missing telephony |
+
+Note on `device/brcm/rpi4` and `frameworks/base`: in the reference tree these
+changes exist partly as local git commits inside those subtrees, so a plain
+`git status` there does **not** show everything — the patch files above are
+generated against the pristine upstream base
+(`git diff <upstream-commit> -- <file>`), and contain the complete delta.
 
 ---
 

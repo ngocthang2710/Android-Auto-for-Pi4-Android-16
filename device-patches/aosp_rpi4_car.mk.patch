@@ -1,8 +1,16 @@
 diff --git a/aosp_rpi4_car.mk b/aosp_rpi4_car.mk
-index 8e61199..5d7375f 100644
+index 764b347..5d7375f 100644
 --- a/aosp_rpi4_car.mk
 +++ b/aosp_rpi4_car.mk
-@@ -33,6 +33,10 @@ PRODUCT_COPY_FILES += \
+@@ -25,10 +25,18 @@ PRODUCT_PACKAGES += \
+ PRODUCT_PACKAGES += \
+     android.hardware.automotive.audiocontrol-service.example
+ 
++# audiocontrol-service.example binds ICarPowerPolicyServer/default at startup
++# and retries forever if it's missing, which stalls the driver user's boot.
++$(call inherit-product, packages/services/Car/cpp/power/product/carpowerpolicy.mk)
++
+ PRODUCT_COPY_FILES += \
      $(DEVICE_PATH)/car/car_audio_configuration.xml:$(TARGET_COPY_OUT_VENDOR)/etc/car_audio_configuration.xml
  
  # Bluetooth
@@ -13,18 +21,31 @@ index 8e61199..5d7375f 100644
  PRODUCT_VENDOR_PROPERTIES += \
      bluetooth.device.class_of_device=38,4,8 \
      bluetooth.profile.asha.central.enabled=false \
-@@ -45,6 +49,7 @@ PRODUCT_VENDOR_PROPERTIES += \
-     bluetooth.profile.hfp.ag.enabled=true \
+@@ -38,9 +46,10 @@ PRODUCT_VENDOR_PROPERTIES += \
+     bluetooth.profile.ccp.server.enabled=false \
+     bluetooth.profile.csip.set_coordinator.enabled=false \
+     bluetooth.profile.hap.client.enabled=false \
+-    bluetooth.profile.hfp.ag.enabled=false \
++    bluetooth.profile.hfp.ag.enabled=true \
      bluetooth.profile.hid.device.enabled=false \
      bluetooth.profile.hid.host.enabled=false \
 +    bluetooth.profile.map.client.enabled=false \
      bluetooth.profile.map.server.enabled=false \
      bluetooth.profile.mcp.server.enabled=false \
      bluetooth.profile.opp.enabled=false \
-@@ -129,6 +134,14 @@ PRODUCT_PACKAGES += \
+@@ -116,6 +125,23 @@ PRODUCT_COPY_FILES += \
  PRODUCT_PACKAGES += \
-     default-permissions-com.android.systemui.xml
+     android.hardware.automotive.vehicle@V4-default-service
  
++# Android Auto Head Unit (aasdk-based wired AA receiver)
++PRODUCT_PACKAGES += \
++    AaSdkUsbBridge
++
++# CarSystemUI's KeyguardService crash-loops without this (see
++# device/brcm/rpi4/permissions/default-permissions-com.android.systemui.xml)
++PRODUCT_PACKAGES += \
++    default-permissions-com.android.systemui.xml
++
 +# AaSdkUsbBridge's BT wireless-projection handshake needs BLUETOOTH_ADVERTISE
 +# to register its RFCOMM SDP record (see
 +# device/brcm/rpi4/permissions/default-permissions-com.android.car.aasdk.xml).
