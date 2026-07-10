@@ -10,6 +10,14 @@ was root-caused against live logs/btsnoop on the real Pi4 + phone, and the
 final result is **confirmed working: a wireless AA session on a 5GHz AP that
 survives video + audio + touch simultaneously.**
 
+![Stable wireless Android Auto session on the Pi4: Spotify playing alongside
+Google Maps in split-screen, no cable attached](screenshot-wireless-stable.png)
+
+*Captured live from the Pi4 (`adb exec-out screencap`) during a wireless
+session after this patch series: music + maps rendering simultaneously —
+exactly the split-video-plus-audio load that used to kill every session at
+the ~20s mark (section 2).*
+
 All commits land on the `aa_wireless` branch; paths below are repo paths with
 their AOSP-tree destinations noted where they differ.
 
