@@ -1,6 +1,6 @@
 # Wireless AA stabilization: from "connects once, then dies" to stable 5GHz projection
 
-Wireless Android Auto (see [wireless-android-auto.md](wireless-android-auto.md))
+Wireless Android Auto (see [../README-wireless.md](../README-wireless.md))
 could complete its whole bring-up — BT handshake, SoftAP, TCP, SSL, video on
 screen — and then reliably fall apart: the phone aborted projection ~5-20s in,
 reconnect attempts spiraled into storms or wedged permanently, and one native
