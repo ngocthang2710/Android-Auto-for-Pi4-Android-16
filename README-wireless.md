@@ -24,8 +24,9 @@ SSL handshake -> service discovery -> video/audio/sensor channels, all the
 way to a rendered Android Auto screen -- the same rendering path as the
 wired README, since it's the same native session/video/input stack
 underneath, including its remaining known issue (black screen on the very
-first boot) and its fixes (touch input, transport-dead recovery -- see
-[README.md](README.md#status)). On top of that, wireless-specific
+first boot) and its fixes (touch input, transport-dead recovery, audio
+stutter on the 3.5mm jack -- see [README.md](README.md#status)). On top of
+that, wireless-specific
 robustness: re-entering the HU screen after backgrounding now reliably
 forces a fresh BT/AP/TCP session instead of leaving a silently dead one
 (see the debugging log).
