@@ -14,8 +14,9 @@ public:
     ~AndroidAudioOutput();
 
     bool init();
-    // data: interleaved 16-bit PCM samples
-    bool write(const int16_t* data, size_t frameCount);
+    // data: interleaved 16-bit PCM samples; sampleCount is the total sample
+    // count across all channels (i.e. buf.size / sizeof(int16_t)), not frames.
+    bool write(const int16_t* data, size_t sampleCount);
     void stop();
 
 private:
