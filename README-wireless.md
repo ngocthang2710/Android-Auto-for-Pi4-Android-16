@@ -17,6 +17,8 @@ Confirmed working end-to-end on real hardware: BT handshake -> SoftAP up ->
 TCP session -> SSL auth -> service discovery -> video decoding and rendering
 on the car screen.
 
+**Demo video:** [Android Auto Wireless on the Pi4 head unit](https://www.youtube.com/watch?v=2nE5ro5rYGA)
+
 ## Status
 
 **Working:** BT RFCOMM handshake -> self-hosted WiFi AP -> TCP session ->
