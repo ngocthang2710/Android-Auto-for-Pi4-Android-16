@@ -26,9 +26,22 @@ void VideoService::start() {
 }
 
 void VideoService::stop() {
-    strand_.dispatch([this, self = shared_from_this()]() {
-        output_->stop();
-    });
+    // Called directly (not via strand_.dispatch()) so it runs synchronously
+    // no matter which thread calls it: AndroidVideoOutput guards its own
+    // state with an internal mutex (see its own kdoc), so dispatching onto
+    // this strand added nothing but a race. Confirmed live 2026-07-12:
+    // AndroidAutoEntity::stop() is itself dispatched onto *its* strand, and
+    // ~AaSdkUsbSession() calls ioService.stop() immediately after -- with
+    // output_->stop() posted onto a *third*, different strand (this one) via
+    // dispatch(), it could still be sitting unexecuted in the queue when
+    // ioService.stop() cut the io_service off, leaving the previous
+    // session's AMediaCodec (and its connection to the persistent
+    // VideoBlitter window) never torn down. The next session's decoder then
+    // failed AMediaCodec_configure() on every one of its 20 retry attempts
+    // with "connect: already connected" from BufferQueueProducer -- not a
+    // transient race the retry budget could ever ride out, since the old
+    // producer was never going to disconnect on its own.
+    output_->stop();
 }
 
 namespace {

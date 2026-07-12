@@ -7,6 +7,7 @@
 #include <ShutdownResponseMessage.pb.h>
 #include <android/log.h>
 #include <functional>
+#include <future>
 #include <string>
 
 #define LOG_TAG "AaSdk_Entity"
@@ -74,7 +75,25 @@ void AndroidAutoEntity::stop() {
     // session; without this guard the second call would double-cancel/
     // double-deinit things that aren't necessarily safe to touch twice.
     if (stopped_.exchange(true)) return;
-    strand_.dispatch([this, self = shared_from_this()]() {
+
+    // Block the caller until the dispatched lambda below has actually run,
+    // instead of just posting it and returning. Confirmed live 2026-07-12:
+    // ~AaSdkUsbSession() calls entity->stop() then immediately ioService.stop()
+    // with nothing in between to wait for -- when stop() is called from
+    // outside this strand (e.g. nativeResetSession()/nativeOnAccessoryDetached()
+    // on the JNI/main thread, or from this entity's own watchdog callback
+    // racing a burst of channel-error re-arms saturating the other workers),
+    // strand_.dispatch() only *posts* the teardown lambda; ioService.stop()
+    // can cut the io_service off before that post ever runs, skipping
+    // videoSvc_->stop() entirely and leaking the video codec's connection to
+    // the persistent VideoBlitter window into the next session (see
+    // VideoService::stop()'s own comment for what that broke: every
+    // AMediaCodec_configure() retry on reconnect failed with "connect:
+    // already connected", audio recovering fine since AndroidAudioOutput has
+    // no equivalent single-producer exclusivity to get stuck on).
+    std::promise<void> stopped;
+    std::future<void> stoppedFuture = stopped.get_future();
+    strand_.dispatch([this, self = shared_from_this(), &stopped]() {
         LOGI("stop");
         boost::system::error_code ec;
         watchdog_.cancel(ec);
@@ -89,7 +108,9 @@ void AndroidAutoEntity::stop() {
         messenger_->stop();
         transport_->stop();
         cryptor_->deinit();
+        stopped.set_value();
     });
+    stoppedFuture.wait();
 }
 
 void AndroidAutoEntity::onVersionResponse(uint16_t major, uint16_t minor,
