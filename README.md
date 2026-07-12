@@ -14,6 +14,8 @@ Qt/RtAudio/OMX.
 ![Android Auto running on the Pi4 head unit](docs/screenshot.png)
 *Google Maps + Spotify running side by side on the car screen, phone connected over wired USB.*
 
+**Demo video:** [Android Auto over USB on the Pi4 head unit](https://www.youtube.com/watch?v=K_rKU2CUrJg)
+
 A **wireless (WiFi) projection** mode was also built on top of this same
 base and has since been merged into `main` -- see
 [README-wireless.md](README-wireless.md). **Going forward, `main` is
