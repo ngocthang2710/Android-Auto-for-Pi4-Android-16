@@ -51,10 +51,12 @@ bool AndroidAudioOutput::init() {
     return true;
 }
 
-bool AndroidAudioOutput::write(const int16_t* data, size_t frameCount) {
+bool AndroidAudioOutput::write(const int16_t* data, size_t sampleCount) {
     if (!stream_) return false;
+    const size_t channelCount = (channel_ == AudioChannel::MEDIA) ? 2 : 1;
+    const int32_t frameCount = (int32_t)(sampleCount / channelCount);
     aaudio_result_t r = AAudioStream_write(
-        stream_, data, (int32_t)frameCount, 100000000LL /*100ms timeout*/);
+        stream_, data, frameCount, 100000000LL /*100ms timeout*/);
     return r > 0;
 }
 

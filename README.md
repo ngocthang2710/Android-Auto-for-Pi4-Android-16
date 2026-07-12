@@ -56,6 +56,20 @@ continues on its own branch rather than here.
   landed outside GearHead's actual window bounds. Fixed by collapsing the
   advertised video config list to the one resolution actually rendered, at
   index 0. Confirmed on hardware: touch-miss errors dropped from 93/93 to 0.
+- **Music audio "stuck"/stuttering on the 3.5mm jack.** `dumpsys
+  media.audio_flinger` showed the stereo MEDIA audio track underrunning and
+  being torn down/recreated every ~50-70s (`AudioTrack: restartIfDisabled`),
+  while the mono SPEECH/SYSTEM track never underran. Root cause:
+  `AndroidAudioOutput::write()` treated its `sampleCount` parameter as a
+  frame count and passed it straight to `AAudioStream_write()`. For a
+  stereo channel (`channel_count=2`) that's 2x the real frame count, so
+  every write told AAudio to expect twice as much audio as was actually
+  supplied, mis-pacing playback into periodic underrun/restart -- mono
+  channels were unaffected since sample count and frame count are the same
+  there, matching the observed evidence exactly. Fixed by dividing
+  `sampleCount` by the channel's channel count before calling
+  `AAudioStream_write()`; no caller changes needed since `AudioService.cpp`
+  already passed the raw interleaved sample count.
 
 ## Repo layout
 
