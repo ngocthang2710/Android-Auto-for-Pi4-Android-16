@@ -25,7 +25,8 @@ way to a rendered Android Auto screen that stays up under video + audio +
 touch simultaneously -- the same rendering path as the wired README, since
 it's the same native session/video/input stack underneath, including its
 remaining known issue (black screen on the very first boot) and its fixes
-(touch input, transport-dead recovery -- see [README.md](README.md#status)).
+(touch input, transport-dead recovery, audio stutter on the 3.5mm jack --
+see [README.md](README.md#status)).
 
 See [Known quirks](#known-quirks-not-bugs) below for the handful of
 non-blocking oddities still open.
